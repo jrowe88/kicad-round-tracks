@@ -26,13 +26,13 @@ The rounded sections are KiCad's native PCB arcs. These _can_ be adjusted after 
 
 ### Radius
 
-"Radius" is the true arc radius on a 90° bend. Shallower bends get a larger arc for the same setting, so they look as gentle as the 90° ones: a 45° bend gets about 2.7× the radius. A smaller arc is used when the tracks are too short or something is in the way. Track ends on a pad or via never move, and corners on a pad, a via or an existing arc are skipped.
+"Radius" is the true arc radius on a 90° bend. Shallower bends get a larger arc for the same setting, so they look as gentle as the 90° ones: a 45° bend gets about 2.7× the radius. A smaller arc is used when the tracks are too short or something is in the way. Corners on a pad, a via or an existing arc are skipped, so track ends there never move. Where other copper of the same net joins a track partway along (another track's end, an arc, a via or a pad), the arc stops at that point, so the joint stays on copper; if that leaves too little room, the corner stays sharp. A radius of 0 turns rounding off for that netclass, like unticking it.
 
-When two corners share a segment too short for both, the segment is split between them in proportion to what each one asked for. Two or more bends that turn the same way and are joined by short segments (two 45° bends close together, say) are replaced by one larger arc, if it fits; this is what you'd do by hand. Bends that turn opposite ways (an S-jog) are never merged.
+When two corners share a segment too short for both, the segment is split between them in proportion to what each one asked for. Two or more bends that turn the same way and are joined by short segments (two 45° bends close together, say) are replaced by one larger arc, if it fits; this is what you'd do by hand. Bends that turn opposite ways (an S-jog) are never merged, and neither are bends with same-net copper joining the short segment between them.
 
 Before rounding, collinear fragments and tiny slivers just before a corner are merged away, so a hidden scrap of track doesn't shrink the curve.
 
-"Min radius" is a floor. A corner that can only fit an arc below it is left sharp rather than given a tiny curve. Every arc is tangent to the tracks on both sides; if that's not possible, the corner stays sharp.
+"Min radius" is a floor. A corner that can only fit an arc below it is left sharp rather than given a tiny curve (so a netclass radius below Min radius leaves every corner in that class sharp, each with a warning). Every arc is tangent to the tracks on both sides; if that's not possible, the corner stays sharp.
 
 ### Junctions
 
@@ -40,15 +40,15 @@ Where three or more tracks meet, each pair of neighbouring tracks gets an arc, a
 
 ### Clearance
 
-Each new arc is checked against other nets' tracks, arcs, vias and pads (through-hole pads on every copper layer), drilled holes, the board edge, and keepout areas that forbid tracks, using the netclass and board clearances. If an arc doesn't clear, it is shrunk until it does; if it still doesn't clear at the min radius, the corner stays sharp. Custom rules in a `.kicad_dru` file are not modelled, and zone fills are ignored (refill them afterwards), so always run DRC after rounding.
+Each new arc is checked against other nets' tracks, arcs, vias and pads (through-hole pads on every copper layer), drilled holes, the board edge, and keepout areas that forbid tracks, using the netclass and board clearances. If an arc doesn't clear, it is shrunk until it does; if it still doesn't clear at the min radius, the corner stays sharp. Custom rules in a `.kicad_dru` file and copper text are not modelled, and zone fills are ignored (refill them afterwards), so always run DRC after rounding.
 
 ### Warnings
 
-Every corner left sharp gets an arrow and a short reason ("too short" or "clearance") on the User.Comments layer. All of them are in one group named `round-tracks-warnings`, so you can select and delete them in one click. Each run removes the previous run's group first; if you rename or ungroup it, the old arrows won't be removed automatically. When it's done, the plugin tells you how many corners were rounded at full radius, reduced, merged, left sharp and skipped.
+Every corner left sharp because it was too short or blocked gets an arrow and a short reason ("too short" or "clearance") on the User.Comments layer. Corners skipped on purpose (where the track width changes, and junctions when "ignore junctions" is ticked) get no arrow; the summary counts them as skipped. All of them are in one group named `round-tracks-warnings`, so you can select and delete them in one click. Each run removes the previous run's group first; if you rename or ungroup it, the old arrows won't be removed automatically. When it's done, the plugin tells you how many corners were rounded at full radius, reduced, merged, left sharp and skipped.
 
 ### Unround
 
-"Unround" turns arcs back into corners where their tangents meet. It is approximate: a merged arc comes back as a single corner, and cleaned-up fragments don't come back at all. Ctrl+Z straight after a run is the exact undo.
+"Unround" turns arcs back into corners where their tangents meet. It is approximate: a merged arc comes back as a single corner, and cleaned-up fragments don't come back at all. Arcs that turn nearly 180° (hairpins) are left in place, and the plugin tells you how many. Ctrl+Z straight after a run is the exact undo.
 
 ## Installation
 Now available from the Plugin and Content manager.
