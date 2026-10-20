@@ -428,6 +428,65 @@ class TestJunctions(unittest.TestCase):
         self.assertFalse(p.updates)
         self.assertFalse(p.sharps)
 
+    def test_on_accept_gets_exactly_the_kept_arcs(self):
+        accepted = []
+        p = plan_fillets(tee(), set(), {1: 2 * MM}, 100_000,
+                         lambda a: arc_radius_of(a) <= MM, False, on_accept=accepted.append)
+        self.assertEqual(p.stats['reduced'], 1)
+        self.assertEqual(len(p.arcs), 2)
+        self.assertEqual(accepted, p.arcs)
+
+    def test_on_accept_not_called_for_sharp_junction(self):
+        corner = [seg(10, (30 * MM, 10 * MM), (30 * MM, 0)),
+                  seg(11, (30 * MM, 0), (40 * MM, 0))]
+        accepted = []
+        p = plan_fillets(tee() + corner, set(), {1: 2 * MM}, 100_000,
+                         lambda a: a.start[0] > 20 * MM, False, on_accept=accepted.append)
+        self.assertEqual(p.sharps, [Sharp((0, 0), 0, 'clearance')])
+        self.assertEqual(len(p.arcs), 1)
+        self.assertEqual(accepted, p.arcs)
+
+    def test_junction_shares_leg_with_corner(self):
+        segs = [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), (2 * MM, 0)),
+                seg(2, (0, 0), (0, 10 * MM)),
+                seg(3, (2 * MM, 0), (2 * MM, -10 * MM))]
+        p = plan(segs)
+        self.assertEqual(p.stats['reduced'], 2)
+        self.assertEqual(len(p.arcs), 3)
+        self.assertEqual(p.tracks, [Seg(-1, (-MM, 0), (MM, 0), 200_000, 0, 1)])
+        self.assertEqual(p.removals, {1})
+        self.assertEqual(p.updates, {0: ((-10 * MM, 0), (-MM, 0)),
+                                     2: ((0, MM), (0, 10 * MM)),
+                                     3: ((2 * MM, -MM), (2 * MM, -10 * MM))})
+        corner_arc = [a for a in p.arcs if a.start[1] < 0 or a.end[1] < 0]
+        self.assertEqual(len(corner_arc), 1)
+        self.assertEqual({corner_arc[0].start, corner_arc[0].end}, {(MM, 0), (2 * MM, -MM)})
+
+    def test_four_way_cross(self):
+        segs = [seg(0, (0, 0), (10 * MM, 0)), seg(1, (0, 0), (0, 10 * MM)),
+                seg(2, (0, 0), (-10 * MM, 0)), seg(3, (0, 0), (0, -10 * MM))]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 4)
+        self.assertFalse(p.tracks)
+        self.assertEqual(p.stats['full'], 1)
+        self.assertEqual(p.updates, {0: ((2 * MM, 0), (10 * MM, 0)),
+                                     1: ((0, 2 * MM), (0, 10 * MM)),
+                                     2: ((-2 * MM, 0), (-10 * MM, 0)),
+                                     3: ((0, -2 * MM), (0, -10 * MM))})
+        for a in p.arcs:
+            self.assertAlmostEqual(arc_radius_of(a), 2 * MM, delta=2_000)
+
+    def test_junction_leg_with_free_end_consumed(self):
+        segs = tee()[:2] + [seg(2, (0, 0), (0, 1_500_000))]
+        p = plan(segs)
+        self.assertEqual(p.stats['reduced'], 1)
+        self.assertEqual(p.removals, {2})
+        self.assertEqual(p.updates, {0: ((-10 * MM, 0), (-1_500_000, 0)),
+                                     1: ((1_500_000, 0), (10 * MM, 0))})
+        self.assertEqual(Counter(pt for a in p.arcs for pt in (a.start, a.end))[(0, 1_500_000)], 2)
+        self.assertEqual(len(p.tracks), 1)
+
     def test_corner_plan_has_no_tracks(self):
         self.assertEqual(plan(ell()).tracks, [])
 

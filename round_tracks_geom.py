@@ -324,11 +324,17 @@ def _shorten(ends, bend, setback):
         ends[s.id] = (new if a == bend.point else a, new if b == bend.point else b)
 
 
-def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junctions):
+def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junctions,
+                 on_accept=None):
     """Plan cleanup, shortenings, fillet arcs and junction connectors.
 
     Plan.updates/removals describe the final state of every original segment id.
     Junctions (3+ segments) are rounded all-or-nothing, or skipped if avoid_junctions.
+
+    `fits(arc) -> bool` must be a pure predicate: it is also asked about probe
+    arcs that are never kept. `on_accept(arc)`, if given, is called exactly once
+    per arc the plan keeps, in Plan.arcs order, as soon as its bend is decided
+    (so later `fits` calls can account for it). Plan.tracks are not reported.
     """
     original = {s.id: (s.a, s.b) for s in segs}
     cleaned, _, removals = cleanup(segs, anchors)
@@ -343,7 +349,10 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
         if setback is None:
             plan.sharps.append(Sharp(b.point, b.layer, key[len('sharp_'):]))
             continue
-        plan.arcs.extend(b.arcs(setback))
+        for arc in b.arcs(setback):
+            plan.arcs.append(arc)
+            if on_accept:
+                on_accept(arc)
         plan.tracks.extend(b.tracks(setback))
         _shorten(ends, b, setback)
         shortened.update(s.id for s in b.legs)
