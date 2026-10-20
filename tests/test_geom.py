@@ -3,7 +3,7 @@ import unittest
 from math import pi
 
 from round_tracks_geom import (setback_request, arc_radius, setback_for_radius,
-                               fillet_points, interior_angle)
+                               fillet_points, interior_angle, Seg, cleanup)
 
 
 class TestPrimitives(unittest.TestCase):
@@ -35,6 +35,61 @@ class TestPrimitives(unittest.TestCase):
         self.assertLess(arc_radius(setback_request(2_000_000, 0.01), 0.01), 100_000)
         setback_request(2_000_000, 0.0)
         arc_radius(setback_request(2_000_000, 0.0), 0.0)
+
+
+MM = 1_000_000
+
+
+def seg(i, a, b, width=200_000, layer=0, net=1):
+    return Seg(i, a, b, width, layer, net)
+
+
+class TestCleanup(unittest.TestCase):
+    def test_merges_collinear_fragment(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM + 300, 0)),
+                seg(2, (5 * MM + 300, 0), (10 * MM, 0))]
+        new, updates, removals = cleanup(segs, set())
+        self.assertEqual([(s.id, s.a, s.b) for s in new], [(0, (0, 0), (10 * MM, 0))])
+        self.assertEqual(removals, {1, 2})
+        self.assertEqual(updates, {0: ((0, 0), (10 * MM, 0))})
+
+    def test_anchor_blocks_merge(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM + 300, 0)),
+                seg(2, (5 * MM + 300, 0), (10 * MM, 0))]
+        new, updates, removals = cleanup(segs, {(5 * MM, 0)})
+        points = {s.a for s in new} | {s.b for s in new}
+        self.assertIn((5 * MM, 0), points)
+        self.assertEqual(len(new), 2)
+        self.assertTrue(removals.isdisjoint(updates))
+
+    def test_different_width_not_merged(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (10 * MM, 0), width=300_000)]
+        new, updates, removals = cleanup(segs, set())
+        self.assertEqual(len(new), 2)
+        self.assertFalse(updates)
+        self.assertFalse(removals)
+
+    def test_removes_sliver_before_corner(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM + 500, 0)),
+                seg(2, (5 * MM + 500, 0), (5 * MM + 500, 5 * MM))]
+        new, updates, removals = cleanup(segs, set())
+        self.assertEqual(len(new), 2)
+        self.assertEqual(new[0].b, new[1].a)
+        self.assertEqual(len(removals), 1)
+        self.assertTrue(removals.isdisjoint(updates))
+
+    def test_junction_point_not_merged(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (10 * MM, 0)),
+                seg(2, (5 * MM, 0), (5 * MM, 5 * MM))]
+        new, updates, removals = cleanup(segs, set())
+        self.assertEqual(len(new), 3)
+        self.assertFalse(updates)
+        self.assertFalse(removals)
 
 
 if __name__ == '__main__':

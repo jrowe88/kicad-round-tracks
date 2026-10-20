@@ -2,9 +2,11 @@
 # Licensed under the Apache License 2.0, like the rest of this plugin.
 
 import math
+from dataclasses import dataclass
 
 Point = tuple  # (int, int)
 ANGLE_TOL = 0.001  # radians
+SLIVER_NM = 1000  # segments shorter than this are cleanup candidates
 
 
 def interior_angle(corner, d1, d2):
@@ -46,3 +48,89 @@ def fillet_points(corner, d1, d2, setback):
     mid = (round(corner[0] * (1 - 2 * f) + start[0] * f + end[0] * f),
            round(corner[1] * (1 - 2 * f) + start[1] * f + end[1] * f))
     return start, mid, end
+
+
+@dataclass
+class Seg:
+    id: int
+    a: Point
+    b: Point
+    width: int
+    layer: int
+    net: int
+
+
+def _index(segs):
+    """Map (layer, net, point) to the set of ids of segments ending there."""
+    index = {}
+    for s in segs.values():
+        for p in (s.a, s.b):
+            index.setdefault((s.layer, s.net, p), set()).add(s.id)
+    return index
+
+
+def _far_end(s, p):
+    return s.b if s.a == p else s.a
+
+
+def _replace_end(s, old, new):
+    if s.a == old:
+        s.a = new
+    if s.b == old:
+        s.b = new
+
+
+def _try_merge(segs, index, anchors):
+    """Merge one collinear pair meeting at a plain two-segment point; True if done."""
+    for (layer, net, p), ids in index.items():
+        if len(ids) != 2 or p in anchors:
+            continue
+        s1, s2 = (segs[i] for i in sorted(ids))
+        f1, f2 = _far_end(s1, p), _far_end(s2, p)
+        if s1.width != s2.width or f1 == p or f2 == p:
+            continue
+        if interior_angle(p, f1, f2) < math.pi - ANGLE_TOL:
+            continue
+        _replace_end(s1, p, f2)
+        del segs[s2.id]
+        return True
+    return False
+
+
+def _try_remove_sliver(segs, index, anchors):
+    """Remove one short segment by pulling its neighbour across; True if done."""
+    for s in sorted(segs.values(), key=lambda s: s.id):
+        if math.dist(s.a, s.b) >= SLIVER_NM:
+            continue
+        options = []
+        for drop, keep in ((s.a, s.b), (s.b, s.a)):
+            others = index[(s.layer, s.net, drop)] - {s.id}
+            if drop in anchors or len(others) != 1:
+                continue
+            neighbour = segs[next(iter(others))]
+            if _far_end(neighbour, drop) == keep:
+                continue
+            fixed = keep in anchors or len(index[(s.layer, s.net, keep)]) > 2
+            options.append((not fixed, drop, keep, neighbour))
+        if options:
+            _, drop, keep, neighbour = min(options, key=lambda o: o[0])
+            _replace_end(neighbour, drop, keep)
+            del segs[s.id]
+            return True
+    return False
+
+
+def cleanup(segs, anchors):
+    """Merge collinear fragments and drop slivers.
+
+    Returns (new_segs, updates, removals): updates maps the id of a surviving
+    original segment to its new (a, b); removals holds the ids that went away.
+    """
+    original = {s.id: (s.a, s.b) for s in segs}
+    work = {s.id: Seg(s.id, s.a, s.b, s.width, s.layer, s.net) for s in segs}
+    while (_try_merge(work, _index(work), anchors)
+           or _try_remove_sliver(work, _index(work), anchors)):
+        pass
+    new_segs = [work[i] for i in sorted(work)]
+    updates = {s.id: (s.a, s.b) for s in new_segs if (s.a, s.b) != original[s.id]}
+    return new_segs, updates, set(original) - set(work)
