@@ -203,6 +203,9 @@ class TestPlanner(unittest.TestCase):
         expected = setback_request(2 * MM, 3 * pi / 4) / setback_request(2 * MM, pi / 2)
         self.assertAlmostEqual(ratio, expected, delta=expected * 0.01)
         self.assertEqual(p.stats['reduced'], 2)
+        self.assertIn(1, p.removals)
+        self.assertNotIn(1, p.updates)
+        self.assertEqual(set(p.updates), {0, 2})
 
     def test_min_radius_leaves_sharp(self):
         p = plan(ell(leg=80_000), min_radius=100_000)
@@ -254,6 +257,50 @@ class TestPlanner(unittest.TestCase):
         self.assertEqual(p.removals, {1})
         self.assertTrue(p.removals.isdisjoint(p.updates))
         self.assertEqual(set(p.updates), {0, 2})
+
+    def test_segment_shortened_from_both_ends_survives(self):
+        segs = [seg(0, (0, 10 * MM), (0, 0)),
+                seg(1, (0, 0), (5 * MM, 0)),
+                seg(2, (5 * MM, 0), (5 * MM, -10 * MM))]
+        p = plan(segs)
+        self.assertEqual(p.stats['full'], 2)
+        self.assertEqual(p.updates[1], ((2 * MM, 0), (3 * MM, 0)))
+        self.assertFalse(p.removals)
+
+    def test_mixed_width_bend_reserves_its_leg(self):
+        segs = [seg(0, (0, 10 * MM), (0, 0)),
+                seg(1, (0, 0), (MM, 0)),
+                seg(2, (MM, 0), (MM, 10 * MM), width=300_000)]
+        p = plan(segs)
+        self.assertEqual(p.stats['skipped'], 1)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertEqual(p.updates[1], ((MM // 2, 0), (MM, 0)))
+        self.assertNotIn(1, p.removals)
+        self.assertNotIn(2, p.updates)
+
+    def test_junction_reserves_its_leg(self):
+        segs = [seg(0, (0, 10 * MM), (0, 0)),
+                seg(1, (0, 0), (MM, 0)),
+                seg(2, (MM, 0), (MM, 10 * MM)),
+                seg(3, (MM, 0), (5 * MM, 0))]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertEqual(p.updates[1], ((MM // 2, 0), (MM, 0)))
+        self.assertEqual(set(p.updates), {0, 1})
+        self.assertFalse(p.removals)
+
+    def test_neighbour_sharp_for_clearance_keeps_geometry(self):
+        segs = [seg(0, (0, 10 * MM), (0, 0)),
+                seg(1, (0, 0), (MM, 0)),
+                seg(2, (MM, 0), (MM, -10 * MM))]
+        p = plan(segs, fits=lambda a: max(a.start[0], a.mid[0], a.end[0]) < MM - 1)
+        self.assertEqual(p.sharps, [Sharp((MM, 0), 0, 'clearance')])
+        self.assertEqual(len(p.arcs), 1)
+        arc = p.arcs[0]
+        self.assertEqual(p.updates, {0: ((0, 10 * MM), (0, MM // 2)),
+                                     1: ((MM // 2, 0), (MM, 0))})
+        self.assertEqual({arc.start, arc.end}, {(0, MM // 2), (MM // 2, 0)})
+        self.assertFalse(p.removals)
 
 
 if __name__ == '__main__':

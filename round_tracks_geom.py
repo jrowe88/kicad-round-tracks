@@ -208,9 +208,29 @@ def _find_corners(segs, anchors, scaling_by_net, stats):
     return corners
 
 
-def _allocate(corners):
-    """Set each corner's setback, sharing segments between the corners at both ends."""
-    requests = {(s.id, c.point): c.request for c in corners for s in c.legs}
+def _end_requests(segs, anchors, scaling_by_net):
+    """Setback each segment end reserves, keyed by (seg id, point).
+
+    Every bend reserves, filleted or not: a two-segment bend asks for its own
+    request, a junction leg for the request of its tightest angle to another leg.
+    Anchors, free ends and straight joints reserve nothing.
+    """
+    by_id = {s.id: s for s in segs}
+    requests = {}
+    for (layer, net, p), ids in _index(by_id).items():
+        if len(ids) < 2 or p in anchors:
+            continue
+        legs = [by_id[i] for i in ids if _far_end(by_id[i], p) != p]
+        for s in legs:
+            angles = [interior_angle(p, _far_end(s, p), _far_end(o, p))
+                      for o in legs if o is not s]
+            if angles and min(angles) < math.pi - ANGLE_TOL:
+                requests[(s.id, p)] = setback_request(scaling_by_net[net], min(angles))
+    return requests
+
+
+def _allocate(corners, requests):
+    """Set each corner's setback, sharing segments with whatever bends their far ends."""
     for c in corners:
         allocations = []
         for s in c.legs:
@@ -266,7 +286,7 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     cleaned, _, removals = cleanup(segs, anchors)
     plan = Plan({}, set(removals))
     corners = _find_corners(cleaned, anchors, scaling_by_net, plan.stats)
-    _allocate(corners)
+    _allocate(corners, _end_requests(cleaned, anchors, scaling_by_net))
     ends = {s.id: (s.a, s.b) for s in cleaned}
     shortened = set()
     for c in corners:
