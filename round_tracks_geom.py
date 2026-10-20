@@ -35,16 +35,18 @@ def setback_for_radius(radius, interior):
     return radius / t if t > 0 else math.inf
 
 
+def point_along(corner, far, distance):
+    """Point `distance` from `corner` towards `far`, rounded to integer nm."""
+    dx, dy = far[0] - corner[0], far[1] - corner[1]
+    length = math.hypot(dx, dy)
+    return (round(corner[0] + dx / length * distance),
+            round(corner[1] + dy / length * distance))
+
+
 def fillet_points(corner, d1, d2, setback):
     """Return (start, mid, end) of the fillet arc. d1/d2 are the far ends of the legs."""
     h = interior_angle(corner, d1, d2) / 2
-    pts = []
-    for d in (d1, d2):
-        dx, dy = d[0] - corner[0], d[1] - corner[1]
-        length = math.hypot(dx, dy)
-        pts.append((round(corner[0] + dx / length * setback),
-                    round(corner[1] + dy / length * setback)))
-    start, end = pts
+    start, end = (point_along(corner, d, setback) for d in (d1, d2))
     f = 1 / (2 * math.cos(math.pi / 2 - h) + 2)
     mid = (round(corner[0] * (1 - 2 * f) + start[0] * f + end[0] * f),
            round(corner[1] * (1 - 2 * f) + start[1] * f + end[1] * f))
@@ -164,48 +166,88 @@ class Plan:
     removals: set
     arcs: list = field(default_factory=list)
     sharps: list = field(default_factory=list)
+    tracks: list = field(default_factory=list)  # new straight connectors, Seg(id=-1)
     stats: Counter = field(default_factory=lambda: Counter(dict.fromkeys(STAT_KEYS, 0)))
 
 
 @dataclass
-class _Corner:
+class _Bend:
+    """A point to fillet: a two-segment corner or a junction of 3+ same-width segments.
+
+    Every leg is shortened by the same setback. `pairs` lists adjacent legs as
+    (i, j, gap): an arc when the gap is below pi, a straight connector when the
+    legs are opposite, nothing when the gap is reflex.
+    """
     point: Point
     layer: int
     net: int
-    legs: tuple  # (Seg, Seg), ordered by id
-    interior: float
-    request: float
+    legs: tuple  # corner: ordered by id; junction: ordered by angle
+    pairs: tuple
+    request: float = 0.0
     setback: float = 0.0
 
-    def far_ends(self):
-        return tuple(_far_end(s, self.point) for s in self.legs)
+    def _far(self, i):
+        return _far_end(self.legs[i], self.point)
 
-    def arc(self, setback):
-        start, mid, end = fillet_points(self.point, *self.far_ends(), setback)
-        return Arc(start, mid, end, self.legs[0].width, self.layer, self.net)
+    def _arc_pairs(self):
+        return [(i, j, gap) for i, j, gap in self.pairs if gap < math.pi - ANGLE_TOL]
+
+    def _straight_pairs(self):
+        return [(i, j, gap) for i, j, gap in self.pairs if abs(gap - math.pi) <= ANGLE_TOL]
+
+    @property
+    def interior(self):
+        """Tightest arc pair: it has the smallest radius at the shared setback."""
+        return min(gap for _, _, gap in self._arc_pairs())
+
+    def arcs(self, setback):
+        return [Arc(*fillet_points(self.point, self._far(i), self._far(j), setback),
+                    self.legs[0].width, self.layer, self.net)
+                for i, j, _ in self._arc_pairs()]
+
+    def tracks(self, setback):
+        return [Seg(-1, point_along(self.point, self._far(i), setback),
+                    point_along(self.point, self._far(j), setback),
+                    self.legs[0].width, self.layer, self.net)
+                for i, j, _ in self._straight_pairs()]
 
 
-def _find_corners(segs, anchors, scaling_by_net, stats):
-    """Two-segment bends in deterministic order; mixed-width bends count as skipped."""
-    corners = []
+def _direction(p, q):
+    return math.atan2(q[1] - p[1], q[0] - p[0])
+
+
+def _find_bends(segs, anchors, scaling_by_net, avoid_junctions, stats):
+    """Corners and junctions in deterministic order; skipped ones are only counted."""
+    bends = []
     by_id = {s.id: s for s in segs}
     for (layer, net, p), ids in _index(by_id).items():
-        if len(ids) != 2 or p in anchors:
+        if len(ids) < 2 or p in anchors:
             continue
-        legs = tuple(by_id[i] for i in sorted(ids))
-        f1, f2 = (_far_end(s, p) for s in legs)
-        if f1 == p or f2 == p:
+        legs = [by_id[i] for i in sorted(ids)]
+        if any(_far_end(s, p) == p for s in legs):
             continue
-        interior = interior_angle(p, f1, f2)
-        if interior >= math.pi - ANGLE_TOL:
-            continue
-        if legs[0].width != legs[1].width:
+        if len(legs) == 2:
+            interior = interior_angle(p, *(_far_end(s, p) for s in legs))
+            if interior >= math.pi - ANGLE_TOL:
+                continue
+            pairs = ((0, 1, interior),)
+        else:
+            if avoid_junctions:
+                stats['skipped'] += 1
+                continue
+            legs.sort(key=lambda s: _direction(p, _far_end(s, p)))
+            angles = [_direction(p, _far_end(s, p)) for s in legs]
+            n = len(legs)
+            pairs = tuple((i, (i + 1) % n, (angles[(i + 1) % n] - angles[i]) % (2 * math.pi))
+                          for i in range(n))
+        if len({s.width for s in legs}) > 1:
             stats['skipped'] += 1
             continue
-        corners.append(_Corner(p, layer, net, legs, interior,
-                               setback_request(scaling_by_net[net], interior)))
-    corners.sort(key=lambda c: (c.net, c.layer, c.point))
-    return corners
+        bend = _Bend(p, layer, net, tuple(legs), pairs)
+        bend.request = setback_request(scaling_by_net[net], bend.interior)
+        bends.append(bend)
+    bends.sort(key=lambda b: (b.net, b.layer, b.point))
+    return bends
 
 
 def _end_requests(segs, anchors, scaling_by_net):
@@ -229,75 +271,82 @@ def _end_requests(segs, anchors, scaling_by_net):
     return requests
 
 
-def _allocate(corners, requests):
-    """Set each corner's setback, sharing segments with whatever bends their far ends."""
-    for c in corners:
-        allocations = []
-        for s in c.legs:
-            mine = requests[(s.id, c.point)]
-            total = mine + requests.get((s.id, _far_end(s, c.point)), 0)
+def _allocate(bends, requests):
+    """Set each bend's shared setback: its request, capped by every leg's share.
+
+    A leg's share splits its length with whatever bends its far end.
+    """
+    for b in bends:
+        allocations = [b.request]
+        for s in b.legs:
+            mine = requests[(s.id, b.point)]
+            total = mine + requests.get((s.id, _far_end(s, b.point)), 0)
             length = math.dist(s.a, s.b)
             allocations.append(mine * length / total if total > length else mine)
-        c.setback = min(allocations)
+        b.setback = min(allocations)
 
 
-def _search_fit(corner, low, high, fits):
-    """Largest arc between setbacks low and high that fits, or None."""
-    best = corner.arc(low)
-    if not fits(best):
+def _fits_all(bend, setback, fits):
+    """Ask `fits` about each arc in leg order, stopping at the first that fails."""
+    return all(fits(arc) for arc in bend.arcs(setback))
+
+
+def _search_fit(bend, low, high, fits):
+    """Largest setback between low and high at which every arc fits, or None."""
+    if not _fits_all(bend, low, fits):
         return None
     for _ in range(SEARCH_STEPS):
         mid = (low + high) / 2
-        arc = corner.arc(mid)
-        if fits(arc):
-            low, best = mid, arc
+        if _fits_all(bend, mid, fits):
+            low = mid
         else:
             high = mid
-    return best
+    return low
 
 
-def _size_corner(corner, min_radius_nm, fits):
-    """Return (arc or None, stats key) for one corner."""
-    radius = arc_radius(corner.setback, corner.interior)
+def _size_bend(bend, min_radius_nm, fits):
+    """Return (setback or None, stats key) for one bend, all-or-nothing."""
+    radius = arc_radius(bend.setback, bend.interior)
     if radius <= 0 or radius < min_radius_nm:
         return None, 'sharp_length'
-    arc = corner.arc(corner.setback)
-    if fits(arc):
-        return arc, 'full' if corner.setback >= corner.request else 'reduced'
-    low = setback_for_radius(min_radius_nm, corner.interior)
-    arc = _search_fit(corner, low, corner.setback, fits)
-    return (arc, 'reduced') if arc else (None, 'sharp_clearance')
+    if _fits_all(bend, bend.setback, fits):
+        return bend.setback, 'full' if bend.setback >= bend.request else 'reduced'
+    low = setback_for_radius(min_radius_nm, bend.interior)
+    setback = _search_fit(bend, low, bend.setback, fits)
+    return (setback, 'reduced') if setback is not None else (None, 'sharp_clearance')
 
 
-def _shorten(ends, corner, arc):
-    """Move both legs' corner ends onto the arc's tangent points."""
-    for s, new in zip(corner.legs, (arc.start, arc.end)):
+def _shorten(ends, bend, setback):
+    """Move every leg's bend end onto its arc tangent point."""
+    for s in bend.legs:
+        new = point_along(bend.point, _far_end(s, bend.point), setback)
         a, b = ends[s.id]
-        ends[s.id] = (new if a == corner.point else a, new if b == corner.point else b)
+        ends[s.id] = (new if a == bend.point else a, new if b == bend.point else b)
 
 
 def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junctions):
-    """Plan cleanup, shortenings and fillet arcs for straight segments.
+    """Plan cleanup, shortenings, fillet arcs and junction connectors.
 
     Plan.updates/removals describe the final state of every original segment id.
-    Junctions (3+ segments) are left untouched; avoid_junctions is not used yet.
+    Junctions (3+ segments) are rounded all-or-nothing, or skipped if avoid_junctions.
     """
     original = {s.id: (s.a, s.b) for s in segs}
     cleaned, _, removals = cleanup(segs, anchors)
     plan = Plan({}, set(removals))
-    corners = _find_corners(cleaned, anchors, scaling_by_net, plan.stats)
-    _allocate(corners, _end_requests(cleaned, anchors, scaling_by_net))
+    bends = _find_bends(cleaned, anchors, scaling_by_net, avoid_junctions, plan.stats)
+    _allocate(bends, _end_requests(cleaned, anchors, scaling_by_net))
     ends = {s.id: (s.a, s.b) for s in cleaned}
     shortened = set()
-    for c in corners:
-        arc, key = _size_corner(c, min_radius_nm, fits)
+    for b in bends:
+        setback, key = _size_bend(b, min_radius_nm, fits)
         plan.stats[key] += 1
-        if arc is None:
-            plan.sharps.append(Sharp(c.point, c.layer, key[len('sharp_'):]))
+        if setback is None:
+            plan.sharps.append(Sharp(b.point, b.layer, key[len('sharp_'):]))
             continue
-        plan.arcs.append(arc)
-        _shorten(ends, c, arc)
-        shortened.update(s.id for s in c.legs)
+        plan.arcs.extend(b.arcs(setback))
+        plan.tracks.extend(b.tracks(setback))
+        _shorten(ends, b, setback)
+        shortened.update(s.id for s in b.legs)
     for i, (a, b) in ends.items():
         if i in shortened and math.dist(a, b) <= SLIVER_NM:
             plan.removals.add(i)

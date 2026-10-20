@@ -1,5 +1,6 @@
 import math
 import unittest
+from collections import Counter
 from math import pi
 
 from round_tracks_geom import (setback_request, arc_radius, setback_for_radius,
@@ -283,7 +284,8 @@ class TestPlanner(unittest.TestCase):
                 seg(1, (0, 0), (MM, 0)),
                 seg(2, (MM, 0), (MM, 10 * MM)),
                 seg(3, (MM, 0), (5 * MM, 0))]
-        p = plan(segs)
+        p = plan_fillets(segs, set(), {1: 2 * MM}, 100_000, lambda a: True, True)
+        self.assertEqual(p.stats['skipped'], 1)
         self.assertEqual(len(p.arcs), 1)
         self.assertEqual(p.updates[1], ((MM // 2, 0), (MM, 0)))
         self.assertEqual(set(p.updates), {0, 1})
@@ -301,6 +303,133 @@ class TestPlanner(unittest.TestCase):
                                      1: ((MM // 2, 0), (MM, 0))})
         self.assertEqual({arc.start, arc.end}, {(0, MM // 2), (MM // 2, 0)})
         self.assertFalse(p.removals)
+
+
+def tee(stem_width=200_000):
+    """Bar along y=0 through the origin, stem going up."""
+    return [seg(0, (-10 * MM, 0), (0, 0)),
+            seg(1, (0, 0), (10 * MM, 0)),
+            seg(2, (0, 0), (0, 10 * MM), width=stem_width)]
+
+
+def touches_up(arc):
+    return max(arc.start[1], arc.mid[1], arc.end[1]) > 0
+
+
+class TestJunctions(unittest.TestCase):
+    def test_y_junction_three_arcs(self):
+        segs = [seg(0, (0, 0), (0, 10 * MM)),
+                seg(1, (-10 * MM, -10 * MM), (0, 0)),
+                seg(2, (0, 0), (10 * MM, -10 * MM))]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 3)
+        self.assertFalse(p.tracks)
+        self.assertEqual(p.stats['full'], 1)
+        self.assertEqual(sum(p.stats.values()), 1)
+        self.assertFalse(p.sharps)
+        # every leg is shortened by the tightest pair's request (2 mm at 90 degrees)
+        d = round(2 * MM / math.sqrt(2))
+        self.assertEqual(p.updates, {0: ((0, 2 * MM), (0, 10 * MM)),
+                                     1: ((-10 * MM, -10 * MM), (-d, -d)),
+                                     2: ((d, -d), (10 * MM, -10 * MM))})
+        ends = Counter(pt for a in p.arcs for pt in (a.start, a.end))
+        self.assertEqual(ends, Counter({(0, 2 * MM): 2, (-d, -d): 2, (d, -d): 2}))
+        radii = sorted(arc_radius_of(a) for a in p.arcs)
+        self.assertAlmostEqual(radii[0], 2 * MM, delta=2_000)
+        self.assertAlmostEqual(radii[2], 2 * MM * math.tan(3 * pi / 8), delta=20_000)
+
+    def test_t_junction_two_arcs_and_connector(self):
+        p = plan(tee())
+        self.assertEqual(len(p.arcs), 2)
+        self.assertEqual(p.tracks, [Seg(-1, (-2 * MM, 0), (2 * MM, 0), 200_000, 0, 1)])
+        self.assertEqual(p.updates, {0: ((-10 * MM, 0), (-2 * MM, 0)),
+                                     1: ((2 * MM, 0), (10 * MM, 0)),
+                                     2: ((0, 2 * MM), (0, 10 * MM))})
+        self.assertEqual({(a.start, a.end) for a in p.arcs},
+                         {((2 * MM, 0), (0, 2 * MM)), ((0, 2 * MM), (-2 * MM, 0))})
+        self.assertEqual(p.stats['full'], 1)
+        self.assertFalse(p.sharps)
+
+    def test_t_junction_all_or_nothing(self):
+        p = plan(tee(), fits=lambda a: not touches_up(a))
+        self.assertEqual(p.sharps, [Sharp((0, 0), 0, 'clearance')])
+        self.assertFalse(p.arcs)
+        self.assertFalse(p.tracks)
+        self.assertFalse(p.updates)
+        self.assertEqual(p.stats['sharp_clearance'], 1)
+
+    def test_one_failing_arc_keeps_whole_junction_sharp(self):
+        p = plan(tee(), fits=lambda a: a.mid[0] > 0)
+        self.assertEqual(p.sharps, [Sharp((0, 0), 0, 'clearance')])
+        self.assertFalse(p.arcs)
+        self.assertFalse(p.tracks)
+        self.assertFalse(p.updates)
+
+    def test_fits_asked_in_sorted_leg_order(self):
+        asked = []
+        plan(tee(), fits=lambda a: asked.append(a) or True)
+        self.assertEqual([(a.start, a.end) for a in asked],
+                         [((2 * MM, 0), (0, 2 * MM)), ((0, 2 * MM), (-2 * MM, 0))])
+
+    def test_clearance_shrinks_shared_setback(self):
+        p = plan(tee(), fits=lambda a: arc_radius_of(a) <= MM)
+        self.assertEqual(p.stats['reduced'], 1)
+        self.assertEqual(len(p.arcs), 2)
+        for a in p.arcs:
+            self.assertTrue(950_000 <= arc_radius_of(a) <= MM)
+        t = p.updates[1][0][0]
+        self.assertEqual(p.updates[0][1], (-t, 0))
+        self.assertEqual(p.updates[2][0], (0, t))
+        self.assertEqual(p.tracks, [Seg(-1, (-t, 0), (t, 0), 200_000, 0, 1)])
+
+    def test_reflex_gap_gets_no_arc_or_connector(self):
+        segs = [seg(0, (0, 0), (10 * MM, 0)),
+                seg(1, (0, 0), (10 * MM, 10 * MM)),
+                seg(2, (0, 0), (0, 10 * MM))]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 2)
+        self.assertFalse(p.tracks)
+        self.assertEqual(p.stats['full'], 1)
+        t = setback_request(2 * MM, pi / 4)
+        self.assertEqual(p.updates[0], ((round(t), 0), (10 * MM, 0)))
+        self.assertEqual(p.updates[2], ((0, round(t)), (0, 10 * MM)))
+        middle = p.updates[1][0]
+        self.assertEqual(sum(pt == middle for a in p.arcs for pt in (a.start, a.end)), 2)
+
+    def test_mixed_width_junction_skipped(self):
+        p = plan(tee(stem_width=300_000))
+        self.assertEqual(p.stats['skipped'], 1)
+        self.assertEqual(sum(p.stats.values()), 1)
+        self.assertFalse(p.arcs)
+        self.assertFalse(p.tracks)
+        self.assertFalse(p.updates)
+        self.assertFalse(p.sharps)
+
+    def test_min_radius_all_or_nothing(self):
+        a20 = math.radians(20)
+        segs = tee()[:2] + [seg(2, (0, 0), (round(10 * MM * math.cos(a20)),
+                                            round(10 * MM * math.sin(a20))))]
+        # the 20 degree pair gets radius ~0.24 mm at the shared setback; the 160 degree
+        # pair alone would be ~7.8 mm, but the junction stays sharp as a whole
+        p = plan(segs, min_radius=300_000)
+        self.assertEqual(p.sharps, [Sharp((0, 0), 0, 'length')])
+        self.assertFalse(p.arcs)
+        self.assertFalse(p.tracks)
+        self.assertFalse(p.updates)
+        self.assertEqual(p.stats['sharp_length'], 1)
+        self.assertEqual(sum(p.stats.values()), 1)
+
+    def test_avoid_junctions_skips(self):
+        p = plan_fillets(tee(), set(), {1: 2 * MM}, 100_000, lambda a: True, True)
+        self.assertEqual(p.stats['skipped'], 1)
+        self.assertEqual(sum(p.stats.values()), 1)
+        self.assertFalse(p.arcs)
+        self.assertFalse(p.tracks)
+        self.assertFalse(p.updates)
+        self.assertFalse(p.sharps)
+
+    def test_corner_plan_has_no_tracks(self):
+        self.assertEqual(plan(ell()).tracks, [])
 
 
 if __name__ == '__main__':
