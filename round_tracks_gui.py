@@ -41,11 +41,10 @@ class RoundTracksDialog ( wx.Dialog ):
 		self.net_class = self.netclasslist.AppendTextColumn( u"Net Class", wx.dataview.DATAVIEW_CELL_INERT, 160, wx.ALIGN_LEFT, wx.dataview.DATAVIEW_COL_RESIZABLE|wx.dataview.DATAVIEW_COL_SORTABLE )
 		self.do_rounding = self.netclasslist.AppendToggleColumn( u"Rounding", wx.dataview.DATAVIEW_CELL_ACTIVATABLE, 80, wx.ALIGN_CENTER, wx.dataview.DATAVIEW_COL_SORTABLE )
 		self.scaling = self.netclasslist.AppendTextColumn( u"Radius (mm)", wx.dataview.DATAVIEW_CELL_EDITABLE, 100, wx.ALIGN_CENTER, wx.dataview.DATAVIEW_COL_SORTABLE )
-		self.passes = self.netclasslist.AppendTextColumn( u"Passes #", wx.dataview.DATAVIEW_CELL_EDITABLE, 80, wx.ALIGN_LEFT, wx.dataview.DATAVIEW_COL_SORTABLE )
 		grid_vert.Add( self.netclasslist, 1, wx.EXPAND|wx.TOP|wx.RIGHT|wx.LEFT, 5 )
 
-		grid_horiz = wx.FlexGridSizer( 0, 3, 0, 0 )
-		grid_horiz.AddGrowableCol( 2 )
+		grid_horiz = wx.FlexGridSizer( 0, 4, 0, 0 )
+		grid_horiz.AddGrowableCol( 3 )
 		grid_horiz.SetFlexibleDirection( wx.BOTH )
 		grid_horiz.SetNonFlexibleGrowMode( wx.FLEX_GROWMODE_SPECIFIED )
 
@@ -53,13 +52,16 @@ class RoundTracksDialog ( wx.Dialog ):
 		self.do_create.SetValue(False)
 		grid_horiz.Add( self.do_create, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT, 5 )
 
-		self.use_native = wx.CheckBox( self, wx.ID_ANY, u"use native fillets", wx.DefaultPosition, wx.DefaultSize, 0 )
-		self.use_native.SetValue(True)
-		grid_horiz.Add( self.use_native, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT, 5 )
-
 		self.avoid_junctions = wx.CheckBox( self, wx.ID_ANY, u"ignore junctions", wx.DefaultPosition, wx.DefaultSize, 0 )
 		self.avoid_junctions.SetValue(False)
 		grid_horiz.Add( self.avoid_junctions, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT, 5 )
+
+		self.min_radius_label = wx.StaticText( self, wx.ID_ANY, u"Min radius (mm)", wx.DefaultPosition, wx.DefaultSize, 0 )
+		self.min_radius_label.Wrap( -1 )
+		grid_horiz.Add( self.min_radius_label, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT, 5 )
+
+		self.min_radius = wx.TextCtrl( self, wx.ID_ANY, u"0.1", wx.DefaultPosition, wx.Size( 60,-1 ), 0 )
+		grid_horiz.Add( self.min_radius, 0, wx.ALL|wx.ALIGN_CENTER_VERTICAL|wx.ALIGN_LEFT, 5 )
 
 		grid_vert.Add( grid_horiz, 1, wx.EXPAND, 5 )
 
@@ -72,7 +74,7 @@ class RoundTracksDialog ( wx.Dialog ):
 		self.apply.SetDefault()
 		grid_buttons.Add( self.apply, 0, wx.ALL, 5 )
 
-		self.unround = wx.Button( self, wx.ID_ANY, u"Unround (native fillets only)", wx.DefaultPosition, wx.Size( 200,-1 ), 0 )
+		self.unround = wx.Button( self, wx.ID_ANY, u"Unround", wx.DefaultPosition, wx.Size( 120,-1 ), 0 )
 		grid_buttons.Add( self.unround, 1, wx.TOP, 5 )
 		grid_vert.Add( grid_buttons, 1, wx.EXPAND, 5 )
 
