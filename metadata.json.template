@@ -1,7 +1,7 @@
 {
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
     "name": "Round Tracks",
-    "description": "A subdivision- and/or native arc-based track rounding plugin.",
+    "description": "A native arc-based track rounding plugin.",
     "description_full": "Algorithmically smooth tracks in a predictable manner. Useful for flex PCBs, or just because it looks cool.",
     "identifier": "com.github.mitxela.kicad-round-tracks",
     "type": "plugin",

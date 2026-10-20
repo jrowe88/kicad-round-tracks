@@ -11,7 +11,7 @@ from collections import Counter
 
 from round_tracks_board import (ClassSetting, ClearanceChecker, Settings, round_board,
                                 summary_text)
-from round_tracks_geom import Arc
+from round_tracks_geom import SLIVER_NM, Arc
 from tests import drc, fixtures
 
 MM = 1_000_000
@@ -203,11 +203,12 @@ class TestCases(unittest.TestCase):
         b.track(10, 10, 30, 10, net, layer)
         b.track(30, 10, 30, 30, net, layer)
 
-    def round_and_check(self, b, radius=3.0):
+    def round_and_check(self, b, radius=3.0, min_radius=0.1):
         """Load, DRC, round, DRC again: no new clearance-family violation."""
         path, board = self.load(b)
         before = drc.clearance_violations(drc.run(path))
-        stats = round_board(board, Settings({'Default': ClassSetting(True, radius)}))
+        stats = round_board(board, Settings({'Default': ClassSetting(True, radius)},
+                                            min_radius_mm=min_radius))
         fixtures.assert_tangent(self, board)
         nets = [t.GetNetname() for t in board.GetTracks()]
         after_path = fixtures.save_copy(board, os.path.join(self.dir, 'after.kicad_pcb'))
@@ -448,6 +449,247 @@ class TestCases(unittest.TestCase):
         self.assertEqual(summary_text(Counter()),
                          'Rounded 0 corners (0 full, 0 reduced, 0 merged). '
                          'Left sharp: 0 too short, 0 clearance. Skipped: 0.')
+
+    # --- problem cases (spec "Intent" #1-#4) ---------------------------------
+    # Each shape is drawn from an origin (x, y) so the mixed board can reuse it.
+
+    def polyline(self, b, pts, net):
+        for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+            b.track(x1, y1, x2, y2, net)
+
+    def sliver_corner(self, b, x, y, net='SIG'):
+        """90 degree corner at (x + 20, y) hiding a collinear 0.5 mm fragment and
+        a 0.7 um diagonal sliver right before it."""
+        self.polyline(b, [(x, y), (x + 19.5, y), (x + 20, y),
+                          (x + 20.0005, y + 0.0005), (x + 20.0005, y + 10)], net)
+
+    def stair(self, b, x, y, net='SIG'):
+        """Four 45 degree steps down-right: 0.5 mm risers, 0.5 mm treads."""
+        d = 0.5 / math.sqrt(2)
+        pts = [(x, y), (x + 10, y)]
+        for _ in range(4):
+            pts.append((pts[-1][0] + d, pts[-1][1] + d))
+            pts.append((pts[-1][0] + 0.5, pts[-1][1]))
+        pts[-1] = (pts[-1][0] + 10, pts[-1][1])
+        self.polyline(b, pts, net)
+
+    def bump(self, b, x, y, net='SIG'):
+        """A __/---\\__ bump: 1 mm 45 degree flanks, 0.3 mm top."""
+        d = 1 / math.sqrt(2)
+        self.polyline(b, [(x, y), (x + 10, y), (x + 10 + d, y - d), (x + 10.3 + d, y - d),
+                          (x + 10.3 + 2 * d, y), (x + 20.3 + 2 * d, y)], net)
+
+    def s_jog(self, b, x, y, net='SIG'):
+        """Reverse 45 degree bends joined by a 0.6 mm diagonal."""
+        d = 0.6 / math.sqrt(2)
+        self.polyline(b, [(x, y), (x + 10, y), (x + 10 + d, y + d), (x + 20 + d, y + d)], net)
+
+    def close_45s(self, b, x, y, net='SIG'):
+        """Two same-direction 45 degree bends 0.3 mm apart (a 90 degree turn)."""
+        d = 0.3 / math.sqrt(2)
+        self.polyline(b, [(x, y), (x + 10, y), (x + 10 + d, y + d), (x + 10 + d, y + 10)],
+                      net)
+
+    def zigzag(self, b, x, y, net='SIG'):
+        """Reverse 90 degree bends 0.05 mm apart (too close for any arc), then a
+        plain 90 degree corner at (x + 20, y + 0.05)."""
+        self.polyline(b, [(x, y), (x + 10, y), (x + 10, y + 0.05), (x + 20, y + 0.05),
+                          (x + 20, y + 10)], net)
+
+    def radii(self, board, net='SIG'):
+        return sorted(a.GetRadius() / MM for a in arcs(board) if a.GetNetname() == net)
+
+    def straight(self, board, net='SIG'):
+        return [t for t in board.GetTracks()
+                if t.GetClass() == 'PCB_TRACK' and t.GetNetname() == net]
+
+    def test_problem1_hidden_sliver(self):
+        b = fixtures.Board()
+        self.sliver_corner(b, 10, 10)
+        board, stats = self.round_and_check(b, radius=2.0)
+        # Without cleanup the 0.5 mm fragment would cap the radius at 0.5 mm.
+        r = self.radii(board)
+        self.assertEqual(len(r), 1)
+        self.assertAlmostEqual(r[0], 2.0, delta=0.002)
+        self.assertEqual((stats['full'], stats['sharp_length'], stats['sharp_clearance']),
+                         (1, 0, 0))
+        self.assertEqual(len(self.straight(board)), 2)
+
+    def test_problem2_stair_step(self):
+        b = fixtures.Board()
+        self.stair(b, 10, 10)
+        board, stats = self.round_and_check(b, radius=2.0)
+        # Every tread and riser is shared half-and-half: a 0.25 mm setback at a
+        # 135 degree bend is a 0.60 mm radius.
+        r = self.radii(board)
+        self.assertEqual(len(r), 8)
+        for x in r:
+            self.assertAlmostEqual(x, 0.25 * math.tan(math.radians(67.5)), delta=0.005)
+        self.assertEqual((stats['merged'], stats['reduced']), (0, 8))
+        self.assertEqual(stats['sharp_length'] + stats['sharp_clearance'], 0)
+
+    def test_problem2_bump(self):
+        b = fixtures.Board()
+        self.bump(b, 10, 20)
+        board, stats = self.round_and_check(b, radius=2.0)
+        # The two top bends turn the same way across a 0.3 mm top: one 90 degree
+        # arc. The bottom bends take half of each 1 mm flank, the merged arc the
+        # rest, so the flanks are used up and the curve is smooth throughout.
+        self.assertEqual((stats['merged'], stats['reduced'], stats['full']), (1, 2, 0))
+        r = self.radii(board)
+        self.assertEqual(len(r), 3)
+        self.assertAlmostEqual(r[0], 0.712, delta=0.005)   # merged: 0.71 mm setback at 90
+        for x in r[1:]:
+            self.assertAlmostEqual(x, 0.5 * math.tan(math.radians(67.5)), delta=0.005)
+        # Only the two outer runs are real tracks. Where the merged arc and a
+        # bottom arc meet, independent rounding can leave a sub-micron connector,
+        # which the planner keeps on purpose so the arcs stay connected.
+        lengths = sorted(t.GetLength() for t in self.straight(board))
+        self.assertEqual(lengths[-2:], [9.5 * MM, 9.5 * MM])
+        self.assertTrue(all(x < SLIVER_NM for x in lengths[:-2]), lengths)
+
+    def test_problem2_s_jog(self):
+        b = fixtures.Board()
+        self.s_jog(b, 10, 10)
+        board, stats = self.round_and_check(b, radius=2.0)
+        # Reverse curves never merge; they split the 0.6 mm diagonal and meet
+        # each other tangentially in its middle.
+        self.assertEqual((stats['merged'], stats['reduced']), (0, 2))
+        r = self.radii(board)
+        self.assertEqual(len(r), 2)
+        for x in r:
+            self.assertAlmostEqual(x, 0.3 * math.tan(math.radians(67.5)), delta=0.005)
+        self.assertEqual(len(self.straight(board)), 2)
+
+    def test_problem2_close_45s_merge(self):
+        b = fixtures.Board()
+        self.close_45s(b, 10, 10)
+        board, stats = self.round_and_check(b, radius=2.0)
+        self.assertEqual(stats['merged'], 1)
+        self.assertEqual(stats['full'] + stats['reduced'], 0)
+        r = self.radii(board)
+        self.assertEqual(len(r), 1)
+        self.assertAlmostEqual(r[0], 2.0, delta=0.005)    # one full 90 degree arc
+        self.assertEqual(len(self.straight(board)), 2)     # the 0.3 mm segment is gone
+
+    def test_problem3_never_non_tangent(self):
+        b = fixtures.Board()
+        self.sliver_corner(b, 10, 10, 'A')
+        self.stair(b, 10, 30, 'B')
+        self.bump(b, 10, 50, 'C')
+        self.s_jog(b, 50, 10, 'D')
+        self.close_45s(b, 50, 30, 'E')
+        self.zigzag(b, 50, 50, 'F')
+        b.track(90, 10, 110, 10, 'G')
+        b.track(110, 10, 110, 30, 'G')
+        b.via(109.2, 10.8, 'H')                            # shrinks G's corner
+        board, stats = self.round_and_check(b, radius=2.0)
+        # round_and_check asserts every arc is tangent. Corners left sharp next
+        # to arcs keep their straight legs: F's zig-zag stays sharp while its
+        # last corner still gets a full arc.
+        self.assertEqual((stats['sharp_length'], stats['sharp_clearance']), (2, 0))
+        self.assertEqual(stats['merged'], 2)               # C's top and E
+        self.assertEqual([len(self.radii(board, n)) for n in 'ABCDEFG'],
+                         [1, 8, 3, 2, 1, 1, 1])
+        self.assertAlmostEqual(self.radii(board, 'F')[0], 2.0, delta=0.002)
+        self.assertLess(self.radii(board, 'G')[0], 1.23)
+        zig = (pcbnew.VECTOR2I(60 * MM, 50 * MM), pcbnew.VECTOR2I(60 * MM, 50_050_000))
+        f_ends = [p for t in self.straight(board, 'F') for p in (t.GetStart(), t.GetEnd())]
+        for p in zig:
+            self.assertEqual(f_ends.count(p), 2)           # sharp corners untouched
+        groups = self.warning_groups(board)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sum(1 for i in groups[0].GetItems() if i.GetClass() == 'PCB_TEXT'),
+                         2)
+
+    def test_problem4_via_clearance(self):
+        # Each via sits inside a bend, clear of the original tracks, where the
+        # full arc would pass within the via's clearance without touching it.
+        # (An arc touching it would make SaveBoard merge the nets and hide the
+        # short from DRC.)
+        h = math.radians(67.5)                             # half the 45 degree bend's angle
+
+        def build():
+            b = fixtures.Board()
+            b.track(10, 10, 20, 10, 'SIGA')
+            b.track(20, 10, 20, 20, 'SIGA')               # 90 degree corner
+            s = 1.77 / math.sqrt(2)                        # 1.77 mm in, on the bisector
+            b.via(20 - s, 10 + s, 'OTHER')
+            b.track(40, 10, 50, 10, 'SIGB')
+            b.track(50, 10, 60, 20, 'SIGB')               # 45 degree bend
+            b.via(50 - 1.2 * math.cos(h), 10 + 1.2 * math.sin(h), 'OTHER')  # 1.2 mm in
+            return b
+
+        # Unchecked, both full arcs cut into the vias' clearance: the reason to check.
+        loose_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, loose_dir, True)
+        loose_path = build().save(loose_dir)
+        loose = pcbnew.LoadBoard(loose_path)
+        before = drc.clearance_violations(drc.run(loose_path))
+        round_board(loose, Settings({'Default': ClassSetting(True, 3.0)}), fits=lambda a: True)
+        nets = [t.GetNetname() for t in loose.GetTracks()]
+        after_path = fixtures.save_copy(loose, os.path.join(loose_dir, 'after.kicad_pcb'))
+        self.assertEqual([t.GetNetname() for t in loose.GetTracks()], nets)
+        after = drc.clearance_violations(drc.run(after_path))
+        self.assertEqual(before, [])
+        self.assertEqual([v['type'] for v in after], ['clearance', 'clearance'], after)
+
+        board, stats = self.round_and_check(build(), radius=3.0)
+        self.assertEqual((stats['reduced'], stats['full']), (2, 0))
+        ra, rb = self.radii(board, 'SIGA'), self.radii(board, 'SIGB')
+        self.assertEqual((len(ra), len(rb)), (1, 1))
+        # The via needs 0.3 + 0.125 + 0.2 mm from the arc centreline: about
+        # 2.77 mm at 90 degrees, and about 6.97 mm (of the full 8.16) at 45.
+        self.assertTrue(2.5 < ra[0] < 2.78, ra)
+        self.assertTrue(6.0 < rb[0] < 6.98, rb)
+
+    def test_t_junction_blocked_leg_all_sharp(self):
+        b = fixtures.Board()
+        b.track(10, 10, 30, 10, 'SIG')
+        b.track(30, 10, 50, 10, 'SIG')
+        b.track(30, 10, 30, 30, 'SIG')
+        # Keepout tucked into the south-east quadrant, clear of the legs: any arc
+        # there of 0.5 mm or more crosses it. The south-west arc alone would fit.
+        b.keepout([(30.13, 10.13), (32, 10.13), (32, 12), (30.13, 12)])
+        board, stats = self.round_and_check(b, radius=2.0, min_radius=0.5)
+        self.assertEqual(arcs(board), [])
+        self.assertEqual(geometry(board, 'SIG'),
+                         sorted((x1 * MM, y1 * MM, x2 * MM, y2 * MM, 250_000, pcbnew.F_Cu)
+                                for x1, y1, x2, y2 in ((10, 10, 30, 10), (30, 10, 50, 10),
+                                                       (30, 10, 30, 30))))
+        self.assertEqual((stats['sharp_clearance'], stats['full'], stats['reduced']),
+                         (1, 0, 0))
+        texts = [i.GetText() for i in self.warning_groups(board)[0].GetItems()
+                 if i.GetClass() == 'PCB_TEXT']
+        self.assertEqual(texts, ['round-tracks: clearance'])
+
+    def test_min_radius_floor_arrow(self):
+        # Reverse 90 degree corners 0.6 mm apart: each can have at most 0.3 mm.
+        for min_radius, expect_arcs in ((0.5, False), (0.25, True)):
+            with self.subTest(min_radius=min_radius):
+                self.dir = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, self.dir, True)
+                b = fixtures.Board()
+                self.polyline(b, [(10, 0), (10, 10), (10.6, 10), (10.6, 20)], 'SIG')
+                board, stats = self.round_and_check(b, radius=2.0, min_radius=min_radius)
+                groups = self.warning_groups(board)
+                if expect_arcs:
+                    self.assertEqual(stats['reduced'], 2)
+                    for r in self.radii(board):
+                        self.assertAlmostEqual(r, 0.3, delta=0.002)
+                    self.assertEqual(groups, [])
+                    continue
+                self.assertEqual(arcs(board), [])
+                self.assertEqual(stats['sharp_length'], 2)
+                self.assertEqual(len(groups), 1)
+                items = list(groups[0].GetItems())
+                self.assertEqual([i.GetText() for i in items if i.GetClass() == 'PCB_TEXT'],
+                                 ['round-tracks: too short'] * 2)
+                for x in (10, 10.6):
+                    corner = pcbnew.VECTOR2I(round(x * MM), 10 * MM)
+                    tips = [i for i in items if i.GetClass() == 'PCB_SHAPE'
+                            and corner in (i.GetStart(), i.GetEnd())]
+                    self.assertEqual(len(tips), 3)          # shaft and head meet at the tip
 
 
 if __name__ == '__main__':

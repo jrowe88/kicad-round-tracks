@@ -1,5 +1,5 @@
 # KiCad Round Tracks
-A subdivision- and/or native arc-based track rounding plugin for KiCad.
+A native arc-based track rounding plugin for KiCad.
 
 The goal is to algorithmically melt a PCB design, smoothing all tracks in a predictable manner. 
 
@@ -8,6 +8,9 @@ The goal is to algorithmically melt a PCB design, smoothing all tracks in a pred
 For best results, use in conjunction with this [teardrop plugin](https://github.com/NilujePerchut/kicad_scripts).
 
 I have written extensively about my kicad melting experiments [here](https://mitxela.com/projects/melting_kicad) and [here](https://mitxela.com/projects/melting_kicad_2).
+
+## About this fork
+This is [jrowe88](https://github.com/jrowe88)'s fork of [mitxela/kicad-round-tracks](https://github.com/mitxela/kicad-round-tracks). It replaces the rounding engine with one that plans every fillet first and then commits them all at once: it cleans up hidden fragments before corners, shares short segments fairly between neighbouring corners, merges close same-direction bends into one arc, keeps arcs clear of other nets, and marks the corners it had to leave sharp. The subdivision mode and the *Passes* setting are gone; all curves are KiCad's native arcs. Everything else here is mitxela's work and that of the earlier authors listed under History.
 
 ## Use
 
@@ -19,11 +22,33 @@ If you select part of the board, only the selected tracks will get melted. If no
 
 "Create a new file" does not immediately write anything to disk, it merely appends "-rounded" to the filename so that the next time you hit Save it won't overwrite the original.
 
-If "use native" is ticked, the rounded sections are implemented using KiCad 6's native PCB arcs. These _can_ be adjusted after the script has run, but I still recommend keeping the unrounded source PCB file. I have tried hard to ensure that the output PCB is the same, regardless of if native or subdivision-based arcs are used. If "use native" is ticked, the number-of-passes parameter is ignored.
+The rounded sections are KiCad's native PCB arcs. These _can_ be adjusted after the script has run, but I still recommend keeping the unrounded source PCB file. Each run is a single undo step, so Ctrl+Z puts everything back exactly.
 
-Otherwise, the curves are generated from many small straight sections. 2 or 3 passes is usually sufficient. There is no loading bar, so if the design is complicated the interface might freeze for a few seconds while it runs. You can set the number of passes to be 1, and run the plugin repeatedly, and it will give the same results, while letting you inspect the intermediate stages.
+### Radius
 
-"Radius" is the maximum radius curve that would result from a 90° bend. A smaller curve will be used if the tracks are shorter, or if the angle between them is sharper. The resulting curves will always pass through at least one point of the original tracks, so individual curves can be controlled by splitting tracks into smaller sections. If a curve has too large a radius, placing a small 45° bend will make it smaller. Similarly, if a bigger radius is needed for certain tracks, you can draw an approximate curve with free-angle tracks to achieve this.
+"Radius" is the true arc radius on a 90° bend. Shallower bends get a larger arc for the same setting, so they look as gentle as the 90° ones: a 45° bend gets about 2.7× the radius. A smaller arc is used when the tracks are too short or something is in the way. Track ends on a pad or via never move, and corners on a pad, a via or an existing arc are skipped.
+
+When two corners share a segment too short for both, the segment is split between them in proportion to what each one asked for. Two or more bends that turn the same way and are joined by short segments (two 45° bends close together, say) are replaced by one larger arc, if it fits; this is what you'd do by hand. Bends that turn opposite ways (an S-jog) are never merged.
+
+Before rounding, collinear fragments and tiny slivers just before a corner are merged away, so a hidden scrap of track doesn't shrink the curve.
+
+"Min radius" is a floor. A corner that can only fit an arc below it is left sharp rather than given a tiny curve. Every arc is tangent to the tracks on both sides; if that's not possible, the corner stays sharp.
+
+### Junctions
+
+Where three or more tracks meet, each pair of neighbouring tracks gets an arc, and every track is shortened by the same amount so the arcs meet them cleanly. A junction is all or nothing: if any of its arcs can't fit, the whole junction stays sharp. Tick "ignore junctions" to leave them all alone. Junctions never take part in merging.
+
+### Clearance
+
+Each new arc is checked against other nets' tracks, arcs, vias and pads (through-hole pads on every copper layer), drilled holes, the board edge, and keepout areas that forbid tracks, using the netclass and board clearances. If an arc doesn't clear, it is shrunk until it does; if it still doesn't clear at the min radius, the corner stays sharp. Custom rules in a `.kicad_dru` file are not modelled, and zone fills are ignored (refill them afterwards), so always run DRC after rounding.
+
+### Warnings
+
+Every corner left sharp gets an arrow and a short reason ("too short" or "clearance") on the User.Comments layer. All of them are in one group named `round-tracks-warnings`, so you can select and delete them in one click. Each run removes the previous run's group first; if you rename or ungroup it, the old arrows won't be removed automatically. When it's done, the plugin tells you how many corners were rounded at full radius, reduced, merged, left sharp and skipped.
+
+### Unround
+
+"Unround" turns arcs back into corners where their tangents meet. It is approximate: a merged arc comes back as a single corner, and cleaned-up fragments don't come back at all. Ctrl+Z straight after a run is the exact undo.
 
 ## Installation
 Now available from the Plugin and Content manager.
@@ -36,6 +61,13 @@ print(pcbnew.GetWizardsSearchPaths())
 
 Under Preferences / Preferences / PCB Editor / Action Plugins, you can choose whether to have a button on the toolbar for quick access to the plugin.
 
+## Tests
+The tests run with KiCad's bundled Python and need `kicad-cli` (installed with KiCad) for the DRC checks. From the repository root, on Windows:
+```
+"C:\Program Files\KiCad\10.0\bin\python.exe" -m unittest discover -s tests -t . -v
+```
+A full run takes a few minutes. `tests/test_geom.py` covers the pure geometry; `tests/test_cases.py` builds a small board for each problem case, rounds it headless and runs DRC on the result. Temporary boards are written outside the repository.
+
 ## History
 This plugin is based on [flexRoundingSuite](https://github.com/jcloiacon/flexRoundingSuite) by Julian Loiacono and [kicad-round-tracks](https://github.com/stimulu/kicad-round-tracks) by Antoine Pintout. My contribution updated the algorithm so that subdivisions are applied equally, resulting in smoother tracks with fewer clearance errors.
 
@@ -43,3 +75,4 @@ Original copyright Miles McCoo, 2017
 Extensively modified by Julian Loiacono, Oct 2018  
 Multi-layer support and repacked as action plugin by Antoine Pintout, May 2019  
 Updated subdivision algorithm by mitxela, Jan 2021  
+Adaptive native fillets, clearance checks and warnings by jrowe88, Oct 2026  
