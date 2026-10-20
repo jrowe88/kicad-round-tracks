@@ -696,5 +696,80 @@ class TestMerge(unittest.TestCase):
         self.assert_tangent_to_final_legs(segs, p)
 
 
+def covered(segs, p, pt, tol=2):
+    """pt lies on a final segment (ends included) or at an arc end."""
+    for a, b in final_segments(segs, p).values():
+        if a == b:
+            continue
+        t = ((pt[0] - a[0]) * (b[0] - a[0]) + (pt[1] - a[1]) * (b[1] - a[1])) / math.dist(a, b)
+        if on_line(pt, a, b, tol) and -tol <= t <= math.dist(a, b) + tol:
+            return True
+    return any(math.dist(pt, e) <= tol for arc in p.arcs for e in (arc.start, arc.end))
+
+
+class TestAttachments(unittest.TestCase):
+    """Same-net copper attached partway along a leg must stay on copper."""
+
+    def plan(self, segs, attach, scaling=2 * MM):
+        return plan_fillets(segs, set(), {1: scaling}, 100_000, lambda a: True, False,
+                            attach_points=set(attach))
+
+    def test_attachment_caps_setback(self):
+        for attach in ((300_000, 0), (300_000, 900)):    # on the line, or within 1 um
+            with self.subTest(attach=attach):
+                segs = ell()
+                p = self.plan(segs, [attach])
+                self.assertEqual(p.stats['reduced'], 1)
+                self.assertEqual(len(p.arcs), 1)
+                self.assertAlmostEqual(arc_radius_of(p.arcs[0]), 300_000, delta=50)
+                self.assertEqual(p.updates[1], ((300_000, 0), (10 * MM, 0)))
+                self.assertTrue(covered(segs, p, attach, tol=1000))
+
+    def test_point_off_the_line_is_not_an_attachment(self):
+        p = self.plan(ell(), [(300_000, 5_000)])
+        self.assertEqual(p.stats['full'], 1)
+
+    def test_attachment_at_a_leg_end_does_not_cap(self):
+        p = self.plan(ell(), [(10 * MM, 0)])
+        self.assertEqual(p.stats['full'], 1)
+
+    def test_attachment_too_close_leaves_sharp(self):
+        p = self.plan(ell(), [(50_000, 0)])    # 0.05 mm: below the 0.1 mm min radius
+        self.assertEqual(p.stats['sharp_length'], 1)
+        self.assertEqual((p.arcs, p.updates, p.removals), ([], {}, set()))
+
+    def test_in_scope_branch_end_caps_setback(self):
+        segs = ell() + [seg(2, (300_000, 0), (300_000, -5 * MM))]   # T-branch end mid-leg
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertAlmostEqual(arc_radius_of(p.arcs[0]), 300_000, delta=50)
+        self.assertTrue(covered(segs, p, (300_000, 0)))
+
+    def test_attachment_is_a_cleanup_anchor(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)), seg(1, (5 * MM, 0), (10 * MM, 0)),
+                seg(2, (10 * MM, 0), (10 * MM, 10 * MM))]
+        p = self.plan(segs, [(5 * MM, 0)])
+        self.assertNotIn(0, p.removals)
+        self.assertNotIn(1, p.removals)
+        self.assertNotIn(0, p.updates)
+        self.assertEqual(p.stats['full'], 1)
+
+    def test_attachment_on_inner_segment_blocks_merge(self):
+        segs = two_45s()
+        mid = (D45 // 2, D45 // 2)
+        p = self.plan(segs, [mid])
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 2)
+        self.assertTrue(covered(segs, p, mid))
+
+    def test_merged_tangent_stops_at_outer_attachment(self):
+        segs = two_45s()
+        attach = (-300_000, 0)    # the free 2 mm merged arc would start at -1.79 mm
+        p = self.plan(segs, [attach])
+        self.assertEqual(p.stats['merged'], 1)
+        self.assertTrue(covered(segs, p, attach))
+        self.assertAlmostEqual(p.updates[0][1][0], -300_000, delta=1)
+
+
 if __name__ == '__main__':
     unittest.main()

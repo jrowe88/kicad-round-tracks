@@ -8,6 +8,8 @@ from dataclasses import dataclass, field, replace
 Point = tuple  # (int, int)
 ANGLE_TOL = 0.001  # radians
 SLIVER_NM = 1000  # segments shorter than this are cleanup candidates
+ATTACH_NM = 1000  # a point this close to a segment's line, between its ends, is on it
+_ATTACH_CELL = 1_000_000  # grid cell of the attachment point index, nm
 
 
 def interior_angle(corner, d1, d2):
@@ -280,10 +282,53 @@ def _share(s, p, requests):
     return mine * length / total if total > length else mine
 
 
-def _allocate(bends, requests):
-    """Set each bend's shared setback: its request, capped by every leg's share."""
+def _attachment_limits(segs, points):
+    """Distance from each segment end to the nearest of `points` on its interior.
+
+    Keyed by (seg id, end point); ends with nothing between them and the other
+    end are left out. A point is on a segment when it is within ATTACH_NM of its
+    line and strictly between its ends.
+    """
+    grid = {}
+    for p in points:
+        grid.setdefault((p[0] // _ATTACH_CELL, p[1] // _ATTACH_CELL), []).append(p)
+    limits = {}
+    for s in segs:
+        length = math.dist(s.a, s.b)
+        if length == 0:
+            continue
+        dx, dy = (s.b[0] - s.a[0]) / length, (s.b[1] - s.a[1]) / length
+        # Sample at most a cell apart: anything within ATTACH_NM of the segment
+        # is then in a cell next to a sample's.
+        n = int(length // _ATTACH_CELL) + 1
+        cells = set()
+        for k in range(n + 1):
+            cx = int((s.a[0] + dx * length * k / n) // _ATTACH_CELL)
+            cy = int((s.a[1] + dy * length * k / n) // _ATTACH_CELL)
+            cells.update((cx + i, cy + j) for i in (-1, 0, 1) for j in (-1, 0, 1))
+        near_a = near_b = math.inf
+        for cell in cells:
+            for p in grid.get(cell, ()):
+                if p == s.a or p == s.b:
+                    continue
+                rx, ry = p[0] - s.a[0], p[1] - s.a[1]
+                along = rx * dx + ry * dy
+                if 0 < along < length and abs(rx * dy - ry * dx) <= ATTACH_NM:
+                    near_a, near_b = min(near_a, along), min(near_b, length - along)
+        if near_a < math.inf:
+            limits[(s.id, s.a)], limits[(s.id, s.b)] = near_a, near_b
+    return limits
+
+
+def _usable(s, p, requests, limits):
+    """Length of `s` its end at `p` may use: its share, stopping at any attachment."""
+    return min(_share(s, p, requests), limits.get((s.id, p), math.inf))
+
+
+def _allocate(bends, requests, limits):
+    """Set each bend's shared setback: its request, capped by every leg's usable length."""
     for b in bends:
-        b.setback = min([b.request] + [_share(s, b.point, requests) for s in b.legs])
+        b.setback = min([b.request] + [_usable(s, b.point, requests, limits) for s in b.legs])
 
 
 def _turn(prev, p, nxt):
@@ -295,11 +340,12 @@ def _other_leg(corner, s):
     return corner.legs[1] if corner.legs[0] is s else corner.legs[0]
 
 
-def _find_runs(bends, requests):
+def _find_runs(bends, requests, limits, attach):
     """Chains of 2+ corners (as indices into bends, in path order) to try merging.
 
     Neighbours in a run share a segment too short for both requests and turn the
     same way. Only two-segment corners take part, and closed loops are never runs.
+    A shared segment with an attachment on it, or at either end, never links.
     """
     at = {}
     for k, b in enumerate(bends):
@@ -313,6 +359,8 @@ def _find_runs(bends, requests):
         (i, s), (j, _) = ends
         c, d = bends[i], bends[j]
         if _share(s, c.point, requests) >= requests[(s.id, c.point)]:
+            continue
+        if (s.id, c.point) in limits or c.point in attach or d.point in attach:
             continue
         fc, fd = _far_end(_other_leg(c, s), c.point), _far_end(_other_leg(d, s), d.point)
         if _turn(fc, c.point, d.point) * _turn(c.point, d.point, fd) <= 0:
@@ -335,7 +383,7 @@ def _find_runs(bends, requests):
     return runs
 
 
-def _merge(run, bends, requests, scaling_nm, min_radius_nm):
+def _merge(run, bends, requests, limits, scaling_nm, min_radius_nm):
     """The run as one virtual corner where its outer legs' lines meet.
 
     Returns (virtual bend, setback, inner segments, (outer leg id, run end) pairs),
@@ -360,12 +408,13 @@ def _merge(run, bends, requests, scaling_nm, min_radius_nm):
     if min(to_v) <= 0:
         return None
     v = (p0[0] + to_v[0] * u0[0], p0[1] + to_v[0] * u0[1])
-    # Each tangent point stays clear of whatever the leg's far end reserves. The
-    # merged request is below every corner request in the run, so two merged runs
-    # sharing a leg can't overlap either.
+    # Each tangent point stays clear of whatever the leg's far end reserves, and
+    # short of any attachment on the leg. The merged request is below every corner
+    # request in the run, so two merged runs sharing a leg can't overlap either.
     legs, caps = [], []
     for s, p, dist_v in zip(outer, (p0, pn), to_v):
         caps.append(dist_v + math.dist(s.a, s.b) - _share(s, _far_end(s, p), requests))
+        caps.append(dist_v + limits.get((s.id, p), math.inf))
         leg = replace(s)
         _replace_end(leg, p, v)
         legs.append(leg)
@@ -419,7 +468,7 @@ def _shorten(ends, bend, setback):
 
 
 def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junctions,
-                 on_accept=None):
+                 on_accept=None, attach_points=None):
     """Plan cleanup, shortenings, fillet arcs and junction connectors.
 
     Plan.updates/removals describe the final state of every original segment id.
@@ -433,14 +482,22 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     arcs that are never kept. `on_accept(arc)`, if given, is called exactly once
     per arc the plan keeps, in Plan.arcs order, as soon as its bend is decided
     (so later `fits` calls can account for it). Plan.tracks are not reported.
+
+    `attach_points` are where other same-net copper (track and arc ends, vias,
+    pads) meets these segments. Cleanup never merges or drops a sliver through
+    one, and no setback or merged arc passes one lying on a segment: the copper
+    left over still reaches it. Ends of the segments themselves that land on
+    another segment's interior count too.
     """
     original = {s.id: (s.a, s.b) for s in segs}
-    cleaned, _, removals = cleanup(segs, anchors)
+    attach = set(attach_points or ())
+    cleaned, _, removals = cleanup(segs, set(anchors) | attach)
     plan = Plan({}, set(removals))
     bends = _find_bends(cleaned, anchors, scaling_by_net, avoid_junctions, plan.stats)
     requests = _end_requests(cleaned, anchors, scaling_by_net)
-    _allocate(bends, requests)
-    runs = {min(run): run for run in _find_runs(bends, requests)}
+    limits = _attachment_limits(cleaned, attach | {e for s in cleaned for e in (s.a, s.b)})
+    _allocate(bends, requests, limits)
+    runs = {min(run): run for run in _find_runs(bends, requests, limits, attach)}
     ends = {s.id: (s.a, s.b) for s in cleaned}
     shortened = set()
     merged = set()
@@ -448,7 +505,8 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
         if k in merged:
             continue
         if k in runs:
-            m = _merge(runs[k], bends, requests, scaling_by_net[b.net], min_radius_nm)
+            m = _merge(runs[k], bends, requests, limits, scaling_by_net[b.net],
+                       min_radius_nm)
             arc = m and m[0].arcs(m[1])[0]
             if arc and fits(arc):
                 virtual, setback, inner, joins = m
