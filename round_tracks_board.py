@@ -99,9 +99,8 @@ def round_board(board, settings, fits=None):
     stats = Counter(dict.fromkeys(STAT_KEYS, 0))
     min_radius_nm = pcbnew.FromMM(settings.min_radius_mm)
     pads_by_net = {}
-    for p in board.GetPads():
-        if not settings.only_selection or p.IsSelected():
-            pads_by_net.setdefault(p.GetNetCode(), []).append(p)
+    for p in board.GetPads():  # selection never matters: pads protect connectivity
+        pads_by_net.setdefault(p.GetNetCode(), []).append(p)
 
     plans = []
     for (net, layer), g in sorted(groups.items()):

@@ -132,6 +132,21 @@ class TestCases(unittest.TestCase):
                                 if g[0] >= 50 * MM or g[2] >= 50 * MM), out)
         fixtures.assert_tangent(self, board)
 
+    def test_selection_only_respects_unselected_pad(self):
+        b = fixtures.Board()
+        b.track(10, 10, 30, 10, 'SIG')
+        b.track(30, 10, 30, 30, 'SIG')
+        b.smd_pad(30, 10, 1.0, 1.0, 'SIG')    # corner inside a pad, legs leave it
+        _, board = self.load(b)
+        for t in board.GetTracks():
+            t.SetSelected()                   # tracks only; the pad stays unselected
+        sig = geometry(board, 'SIG')
+
+        round_board(board, Settings({'Default': ClassSetting(True, 2.0)}, only_selection=True))
+
+        self.assertEqual(arcs(board), [])
+        self.assertEqual(geometry(board, 'SIG'), sig)
+
     def test_rerun_does_not_double_round(self):
         b = fixtures.Board()
         b.track(10, 10, 30, 10, 'SIG')
