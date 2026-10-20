@@ -3,7 +3,7 @@
 
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 Point = tuple  # (int, int)
 ANGLE_TOL = 0.001  # radians
@@ -271,19 +271,113 @@ def _end_requests(segs, anchors, scaling_by_net):
     return requests
 
 
-def _allocate(bends, requests):
-    """Set each bend's shared setback: its request, capped by every leg's share.
+def _share(s, p, requests):
+    """Length of `s` its end at `p` may use: its request, or a proportional part
+    of the segment when the requests at both ends don't fit."""
+    mine = requests.get((s.id, p), 0)
+    total = mine + requests.get((s.id, _far_end(s, p)), 0)
+    length = math.dist(s.a, s.b)
+    return mine * length / total if total > length else mine
 
-    A leg's share splits its length with whatever bends its far end.
-    """
+
+def _allocate(bends, requests):
+    """Set each bend's shared setback: its request, capped by every leg's share."""
     for b in bends:
-        allocations = [b.request]
-        for s in b.legs:
-            mine = requests[(s.id, b.point)]
-            total = mine + requests.get((s.id, _far_end(s, b.point)), 0)
-            length = math.dist(s.a, s.b)
-            allocations.append(mine * length / total if total > length else mine)
-        b.setback = min(allocations)
+        b.setback = min([b.request] + [_share(s, b.point, requests) for s in b.legs])
+
+
+def _turn(prev, p, nxt):
+    """Cross product of the two directions through p; its sign is the turn side."""
+    return (p[0] - prev[0]) * (nxt[1] - p[1]) - (p[1] - prev[1]) * (nxt[0] - p[0])
+
+
+def _other_leg(corner, s):
+    return corner.legs[1] if corner.legs[0] is s else corner.legs[0]
+
+
+def _find_runs(bends, requests):
+    """Chains of 2+ corners (as indices into bends, in path order) to try merging.
+
+    Neighbours in a run share a segment too short for both requests and turn the
+    same way. Only two-segment corners take part, and closed loops are never runs.
+    """
+    at = {}
+    for k, b in enumerate(bends):
+        if len(b.legs) == 2:
+            for s in b.legs:
+                at.setdefault(s.id, []).append((k, s))
+    links = {}
+    for ends in at.values():
+        if len(ends) != 2:
+            continue
+        (i, s), (j, _) = ends
+        c, d = bends[i], bends[j]
+        if _share(s, c.point, requests) >= requests[(s.id, c.point)]:
+            continue
+        fc, fd = _far_end(_other_leg(c, s), c.point), _far_end(_other_leg(d, s), d.point)
+        if _turn(fc, c.point, d.point) * _turn(c.point, d.point, fd) <= 0:
+            continue
+        links.setdefault(i, []).append(j)
+        links.setdefault(j, []).append(i)
+    runs, seen = [], set()
+    for start in sorted(links):
+        if start in seen or len(links[start]) != 1:
+            continue
+        run, prev = [start], None
+        while True:
+            seen.add(run[-1])
+            nxt = [k for k in links[run[-1]] if k != prev]
+            if not nxt:
+                break
+            prev = run[-1]
+            run.append(nxt[0])
+        runs.append(run)
+    return runs
+
+
+def _merge(run, bends, requests, scaling_nm, min_radius_nm):
+    """The run as one virtual corner where its outer legs' lines meet.
+
+    Returns (virtual bend, setback, inner segments, (outer leg id, run end) pairs),
+    or None when the merged arc can't be tangent to both outer legs, is below
+    min radius, or isn't larger than the run's best separate arc (by allocation).
+    """
+    corners = [bends[k] for k in run]
+    inner = [next(s for s in c.legs if s in d.legs) for c, d in zip(corners, corners[1:])]
+    first, last = corners[0], corners[-1]
+    outer = (_other_leg(first, inner[0]), _other_leg(last, inner[-1]))
+    turn = sum(math.pi - c.interior for c in corners)
+    if outer[0] is outer[1] or turn >= math.pi - ANGLE_TOL:
+        return None
+    (p0, f0), (pn, fn) = ((c.point, _far_end(s, c.point)) for c, s in zip((first, last), outer))
+    u0 = [(p0[i] - f0[i]) / math.dist(p0, f0) for i in (0, 1)]
+    un = [(fn[i] - pn[i]) / math.dist(pn, fn) for i in (0, 1)]
+    det = u0[0] * un[1] - u0[1] * un[0]
+    if det == 0:
+        return None
+    d = (pn[0] - p0[0], pn[1] - p0[1])
+    to_v = ((d[0] * un[1] - d[1] * un[0]) / det, (u0[0] * d[1] - u0[1] * d[0]) / det)
+    if min(to_v) <= 0:
+        return None
+    v = (p0[0] + to_v[0] * u0[0], p0[1] + to_v[0] * u0[1])
+    # Each tangent point stays clear of whatever the leg's far end reserves. The
+    # merged request is below every corner request in the run, so two merged runs
+    # sharing a leg can't overlap either.
+    legs, caps = [], []
+    for s, p, dist_v in zip(outer, (p0, pn), to_v):
+        caps.append(dist_v + math.dist(s.a, s.b) - _share(s, _far_end(s, p), requests))
+        leg = replace(s)
+        _replace_end(leg, p, v)
+        legs.append(leg)
+    legs.sort(key=lambda s: s.id)
+    interior = interior_angle(v, *(_far_end(s, v) for s in legs))
+    virtual = _Bend(v, first.layer, first.net, tuple(legs), ((0, 1, interior),))
+    setback = min([setback_request(scaling_nm, interior)] + caps)
+    radius = arc_radius(setback, interior)
+    best = max(arc_radius(c.setback, c.interior) for c in corners)
+    if setback < max(to_v) or radius < min_radius_nm or radius <= best:
+        return None
+    return virtual, setback, inner, ((outer[0].id, p0), (outer[1].id, pn))
 
 
 def _fits_all(bend, setback, fits):
@@ -330,6 +424,10 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
 
     Plan.updates/removals describe the final state of every original segment id.
     Junctions (3+ segments) are rounded all-or-nothing, or skipped if avoid_junctions.
+    A run of same-direction corners joined by short segments becomes one arc on
+    its outer legs when that arc is larger and fits (take-or-leave, no search);
+    otherwise its corners are sized one by one. The run is decided in the place
+    of its first corner in bend order.
 
     `fits(arc) -> bool` must be a pure predicate: it is also asked about probe
     arcs that are never kept. `on_accept(arc)`, if given, is called exactly once
@@ -340,10 +438,33 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     cleaned, _, removals = cleanup(segs, anchors)
     plan = Plan({}, set(removals))
     bends = _find_bends(cleaned, anchors, scaling_by_net, avoid_junctions, plan.stats)
-    _allocate(bends, _end_requests(cleaned, anchors, scaling_by_net))
+    requests = _end_requests(cleaned, anchors, scaling_by_net)
+    _allocate(bends, requests)
+    runs = {min(run): run for run in _find_runs(bends, requests)}
     ends = {s.id: (s.a, s.b) for s in cleaned}
     shortened = set()
-    for b in bends:
+    merged = set()
+    for k, b in enumerate(bends):
+        if k in merged:
+            continue
+        if k in runs:
+            m = _merge(runs[k], bends, requests, scaling_by_net[b.net], min_radius_nm)
+            arc = m and m[0].arcs(m[1])[0]
+            if arc and fits(arc):
+                virtual, setback, inner, joins = m
+                plan.arcs.append(arc)
+                if on_accept:
+                    on_accept(arc)
+                plan.stats['merged'] += 1
+                merged.update(runs[k])
+                for s in inner:
+                    del ends[s.id]
+                    plan.removals.add(s.id)
+                for i, p in joins:  # extend the outer legs to the virtual corner
+                    ends[i] = tuple(virtual.point if e == p else e for e in ends[i])
+                _shorten(ends, virtual, setback)
+                shortened.update(i for i, _ in joins)
+                continue
         setback, key = _size_bend(b, min_radius_nm, fits)
         plan.stats[key] += 1
         if setback is None:

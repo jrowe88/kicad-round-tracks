@@ -491,5 +491,186 @@ class TestJunctions(unittest.TestCase):
         self.assertEqual(plan(ell()).tracks, [])
 
 
+def circumcentre(arc):
+    (ax, ay), (bx, by), (cx, cy) = arc.start, arc.mid, arc.end
+    d = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by))
+    ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay)
+          + (cx * cx + cy * cy) * (ay - by)) / d
+    uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx)
+          + (cx * cx + cy * cy) * (bx - ax)) / d
+    return ux, uy
+
+
+def final_segments(segs, p):
+    """Surviving segments after the plan, as id -> (a, b)."""
+    return {s.id: p.updates.get(s.id, (s.a, s.b)) for s in segs if s.id not in p.removals}
+
+
+def on_line(pt, a, b, tol=2):
+    """Distance from pt to the infinite line through a and b is within tol."""
+    cross = (b[0] - a[0]) * (pt[1] - a[1]) - (b[1] - a[1]) * (pt[0] - a[0])
+    return abs(cross) / math.dist(a, b) <= tol
+
+
+def tangent_at(arc, pt, a, b, tol=1e-4):
+    """The arc's radius at pt is perpendicular to the line a-b."""
+    cx, cy = circumcentre(arc)
+    rx, ry = pt[0] - cx, pt[1] - cy
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    return abs(rx * dx + ry * dy) / (math.hypot(rx, ry) * math.hypot(dx, dy)) <= tol
+
+
+D45 = 212_132  # 0.3 mm at 45 degrees, per axis
+
+
+def two_45s():
+    """East, two left 45 degree bends 0.3 mm apart, then north."""
+    return [seg(0, (-10 * MM, 0), (0, 0)),
+            seg(1, (0, 0), (D45, D45)),
+            seg(2, (D45, D45), (D45, D45 + 10 * MM))]
+
+
+class TestMerge(unittest.TestCase):
+    def assert_tangent_to_final_legs(self, segs, p):
+        """Every arc endpoint ends a final segment the arc is tangent to, or meets
+        another arc where both are tangent to the same (used-up) original segment."""
+        final = final_segments(segs, p)
+        for arc in p.arcs:
+            for pt in (arc.start, arc.end):
+                owners = [(a, b) for a, b in final.values() if pt in (a, b)]
+                if owners:
+                    self.assertEqual(len(owners), 1, (pt, final))
+                    self.assertTrue(tangent_at(arc, pt, *owners[0]), (arc, owners[0]))
+                    continue
+                others = [o for o in p.arcs if o is not arc and pt in (o.start, o.end)]
+                self.assertEqual(len(others), 1, (pt, final))
+                lines = [(s.a, s.b) for s in segs if s.id in p.removals
+                         and on_line(pt, s.a, s.b)]
+                self.assertTrue(any(tangent_at(arc, pt, *ln) and tangent_at(others[0], pt, *ln)
+                                    for ln in lines), (pt, arc, others[0]))
+
+    def test_two_45s_merge_into_one_arc(self):
+        segs = two_45s()
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 1)
+        self.assertEqual(p.stats['full'] + p.stats['reduced'], 0)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertEqual(p.removals, {1})
+        arc = p.arcs[0]
+        self.assertAlmostEqual(arc_radius_of(arc), 2 * MM, delta=2_000)
+        self.assertTrue(on_line(arc.start, (-10 * MM, 0), (0, 0)))
+        self.assertTrue(on_line(arc.end, (D45, D45), (D45, 10 * MM)))
+        (a0, b0), (a2, b2) = p.updates[0], p.updates[2]
+        self.assertEqual(a0, (-10 * MM, 0))
+        self.assertAlmostEqual(b0[0], D45 - 2 * MM, delta=1)
+        self.assertAlmostEqual(a2[1], 2 * MM, delta=1)
+        self.assertEqual(b2, (D45, D45 + 10 * MM))
+        self.assertEqual(set(p.updates), {0, 2})
+        self.assert_tangent_to_final_legs(segs, p)
+
+    def test_merge_rejected_falls_back(self):
+        segs = two_45s()
+        p = plan(segs, fits=lambda a: arc_radius_of(a) <= MM)
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 2)
+        self.assertEqual(p.removals, {1})  # the two arcs share the 0.3 mm segment
+        self.assert_tangent_to_final_legs(segs, p)
+
+    def test_on_accept_gets_merged_arc_once(self):
+        accepted = []
+        p = plan_fillets(two_45s(), set(), {1: 2 * MM}, 100_000, lambda a: True, False,
+                         on_accept=accepted.append)
+        self.assertEqual(p.stats['merged'], 1)
+        self.assertEqual(accepted, p.arcs)
+        self.assertEqual(len(accepted), 1)
+
+    def test_on_accept_skips_rejected_merge(self):
+        accepted, asked = [], []
+
+        def fits(arc):
+            asked.append(arc_radius_of(arc))
+            return arc_radius_of(arc) <= MM
+        p = plan_fillets(two_45s(), set(), {1: 2 * MM}, 100_000, fits, False,
+                         on_accept=accepted.append)
+        self.assertGreater(asked[0], MM)  # the merged arc is asked about first
+        self.assertEqual(accepted, p.arcs)
+        self.assertTrue(all(arc_radius_of(a) <= MM for a in accepted))
+
+    def test_three_bends_merge(self):
+        c2 = (259_808, 150_000)
+        c3 = (409_808, 409_808)
+        segs = [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), c2),
+                seg(2, c2, c3),
+                seg(3, c3, (c3[0], 10 * MM))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 1)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertEqual(p.removals, {1, 2})
+        self.assertAlmostEqual(arc_radius_of(p.arcs[0]), 2 * MM, delta=2_000)
+        self.assert_tangent_to_final_legs(segs, p)
+
+    def test_long_inner_segment_not_merged(self):
+        segs = [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), (5 * MM, 5 * MM)),
+                seg(2, (5 * MM, 5 * MM), (5 * MM, 20 * MM))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(p.stats['full'], 2)
+
+    def test_u_turn_not_merged(self):
+        segs = [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), (0, 300_000)),
+                seg(2, (0, 300_000), (-10 * MM, 300_000))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 2)
+
+    def test_anchor_breaks_run(self):
+        p = plan(two_45s(), anchors={(D45, D45)})
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 1)
+
+    def test_adjacent_runs_share_a_leg(self):
+        top = D45 + MM
+        segs = two_45s()[:2] + [seg(2, (D45, D45), (D45, top)),
+                                seg(3, (D45, top), (2 * D45, top + D45)),
+                                seg(4, (2 * D45, top + D45), (2 * D45 + 10 * MM, top + D45))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 2)
+        self.assertEqual(len(p.arcs), 2)
+        self.assertEqual(p.removals, {1, 2, 3})  # the 1 mm leg is used up from both ends
+        self.assert_tangent_to_final_legs(segs, p)
+
+    def test_s_jog_not_merged_and_tangent(self):
+        d = 424_264  # 0.6 mm at 45 degrees, per axis
+        segs = [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), (d, d)),
+                seg(2, (d, d), (d + 10 * MM, d))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 2)
+        ends = [pt for a in p.arcs for pt in (a.start, a.end) if on_line(pt, (0, 0), (d, d))
+                and 0 < pt[0] < d]
+        self.assertEqual(len(ends), 2)
+        e0, e1 = sorted(ends)
+        self.assertGreaterEqual(e1[0] - e0[0], 0)
+        self.assert_tangent_to_final_legs(segs, p)
+
+    def test_stair_step_all_tangent(self):
+        diag, tread = 353_553, 500_000  # 0.5 mm risers at 45 degrees, 0.5 mm treads
+        pts = [(-10 * MM, 0), (0, 0)]
+        for _ in range(4):
+            x, y = pts[-1]
+            pts.append((x + diag, y + diag))
+            pts.append((pts[-1][0] + tread, pts[-1][1]))
+        pts[-1] = (pts[-1][0] + 10 * MM, pts[-1][1])
+        segs = [seg(i, a, b) for i, (a, b) in enumerate(zip(pts, pts[1:]))]
+        p = plan(segs)
+        self.assertEqual(p.stats['merged'], 0)
+        self.assertEqual(len(p.arcs), 8)
+        self.assert_tangent_to_final_legs(segs, p)
+
+
 if __name__ == '__main__':
     unittest.main()
