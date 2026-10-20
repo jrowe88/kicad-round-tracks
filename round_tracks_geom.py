@@ -478,7 +478,9 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
         _shorten(ends, b, setback)
         shortened.update(s.id for s in b.legs)
     for i, (a, b) in ends.items():
-        if i in shortened and math.dist(a, b) <= SLIVER_NM:
+        # Only a fully used-up segment goes; any leftover, however short, keeps
+        # the arcs at its ends connected (and is collinear with their tangents).
+        if i in shortened and a == b:
             plan.removals.add(i)
         elif (a, b) != original[i]:
             plan.updates[i] = (a, b)

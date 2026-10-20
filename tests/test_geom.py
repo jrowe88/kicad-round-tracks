@@ -5,7 +5,7 @@ from math import pi
 
 from round_tracks_geom import (setback_request, arc_radius, setback_for_radius,
                                fillet_points, interior_angle, Seg, cleanup,
-                               Sharp, plan_fillets)
+                               Sharp, plan_fillets, SLIVER_NM)
 
 
 class TestPrimitives(unittest.TestCase):
@@ -642,6 +642,23 @@ class TestMerge(unittest.TestCase):
         self.assertEqual(p.removals, {1, 2, 3})  # the 1 mm leg is used up from both ends
         self.assert_tangent_to_final_legs(segs, p)
 
+    def test_sub_micron_leftover_keeps_track_connected(self):
+        pts = [(0, 0), (-527197, -7756385), (8186093, -10274344), (8544687, -10286083),
+               (11889706, -1269023), (11517653, 2167973)]
+        segs = [seg(i, a, b) for i, (a, b) in enumerate(zip(pts, pts[1:]))]
+        p = plan(segs, scaling=MM // 2, fits=lambda a: arc_radius_of(a) <= 1_500_000)
+        final = final_segments(segs, p)
+        for i in p.removals:
+            self.assertNotIn(i, p.updates)
+        seg_ends = Counter(pt for a, b in final.values() for pt in (a, b))
+        arc_ends = Counter(pt for a in p.arcs for pt in (a.start, a.end))
+        for pt in arc_ends:
+            self.assertEqual(seg_ends[pt] + arc_ends[pt], 2, pt)
+        self.assertIn(2, final)
+        a, b = final[2]
+        self.assertGreater(math.dist(a, b), 0)
+        self.assertLess(math.dist(a, b), SLIVER_NM)
+
     def test_s_jog_not_merged_and_tangent(self):
         d = 424_264  # 0.6 mm at 45 degrees, per axis
         segs = [seg(0, (-10 * MM, 0), (0, 0)),
@@ -650,11 +667,18 @@ class TestMerge(unittest.TestCase):
         p = plan(segs)
         self.assertEqual(p.stats['merged'], 0)
         self.assertEqual(len(p.arcs), 2)
-        ends = [pt for a in p.arcs for pt in (a.start, a.end) if on_line(pt, (0, 0), (d, d))
-                and 0 < pt[0] < d]
-        self.assertEqual(len(ends), 2)
-        e0, e1 = sorted(ends)
-        self.assertGreaterEqual(e1[0] - e0[0], 0)
+        low = [a for a in p.arcs if on_line(a.start, (0, 0), (MM, 0))
+               or on_line(a.end, (0, 0), (MM, 0))]
+        self.assertEqual(len(low), 1)
+        high = [a for a in p.arcs if a is not low[0]]
+
+        def along(arc):
+            """Distance from (0, 0) of the arc's end on the 0.6 mm segment."""
+            on = [pt for pt in (arc.start, arc.end) if on_line(pt, (0, 0), (d, d))
+                  and 0 < pt[0] < d]
+            self.assertEqual(len(on), 1)
+            return math.dist((0, 0), on[0])
+        self.assertLessEqual(along(low[0]), along(high[0]))
         self.assert_tangent_to_final_legs(segs, p)
 
     def test_stair_step_all_tangent(self):
