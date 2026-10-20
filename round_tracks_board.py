@@ -2,6 +2,7 @@
 # Runs headless (pcbnew.LoadBoard) as well as from the action plugin.
 # Licensed under the Apache License 2.0, like the rest of this plugin.
 
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -288,9 +289,12 @@ def round_board(board, settings, fits=None):
         plans.append(plan_fillets(segs, anchors, {net: scaling[net]}, min_radius_nm, fits,
                                   settings.avoid_junctions, on_accept))
     # Compute everything first, then touch the board.
+    sharps = []
     for plan in plans:
         commit(board, plan, objects, settings.only_selection)
         stats.update(plan.stats)
+        sharps.extend(plan.sharps)
+    draw_warnings(board, sharps)
     return stats
 
 
@@ -321,3 +325,69 @@ def commit(board, plan, objects, select):
         item.SetStart(_vec(seg.a))
         item.SetEnd(_vec(seg.b))
         _add(board, item, seg.layer, seg.width, seg.net, select)
+
+
+WARNING_GROUP = 'round-tracks-warnings'
+_WARNING_TEXT = {'length': 'round-tracks: too short', 'clearance': 'round-tracks: clearance'}
+_ARROW_LEN_MM = 1.5
+_ARROW_HEAD_MM = 0.4
+_ARROW_WIDTH_MM = 0.1
+_TEXT_HEIGHT_MM = 0.5
+
+
+def _remove_warnings(board):
+    for group in [g for g in board.Groups() if g.GetName() == WARNING_GROUP]:
+        items = list(group.GetItems())
+        for item in items:
+            group.RemoveItem(item)
+            board.Remove(item)
+        board.Remove(group)
+
+
+def _line(board, group, a, b):
+    shape = pcbnew.PCB_SHAPE(board)
+    shape.SetShape(pcbnew.SHAPE_T_SEGMENT)
+    shape.SetStart(_vec(a))
+    shape.SetEnd(_vec(b))
+    shape.SetLayer(pcbnew.Cmts_User)
+    shape.SetWidth(pcbnew.FromMM(_ARROW_WIDTH_MM))
+    board.Add(shape)
+    group.AddItem(shape)
+
+
+def draw_warnings(board, sharps):
+    """Replace the warning group: an arrow and a label at every corner left sharp."""
+    _remove_warnings(board)
+    if not sharps:
+        return
+    group = pcbnew.PCB_GROUP(board)
+    group.SetName(WARNING_GROUP)
+    board.Add(group)
+    length = pcbnew.FromMM(_ARROW_LEN_MM)
+    head = pcbnew.FromMM(_ARROW_HEAD_MM)
+    back = math.radians(45 + 180)  # from the tip towards the tail (upper-left)
+    for sharp in sharps:
+        tip = sharp.point
+        tail = (tip[0] + round(length * math.cos(back)),
+                tip[1] + round(length * math.sin(back)))
+        _line(board, group, tail, tip)
+        for spread in (-30, 30):
+            ang = back + math.radians(spread)
+            _line(board, group, tip, (tip[0] + round(head * math.cos(ang)),
+                                      tip[1] + round(head * math.sin(ang))))
+        text = pcbnew.PCB_TEXT(board)
+        text.SetText(_WARNING_TEXT[sharp.reason])
+        text.SetLayer(pcbnew.Cmts_User)
+        text.SetPosition(_vec(tail))
+        size = pcbnew.FromMM(_TEXT_HEIGHT_MM)
+        text.SetTextSize(pcbnew.VECTOR2I(size, size))
+        board.Add(text)
+        group.AddItem(text)
+
+
+def summary_text(stats):
+    rounded = stats['full'] + stats['reduced'] + stats['merged']
+    return ('Rounded %d corners (%d full, %d reduced, %d merged). '
+            'Left sharp: %d too short, %d clearance. Skipped: %d.'
+            % (rounded, stats['full'], stats['reduced'], stats['merged'],
+               stats['sharp_length'], stats['sharp_clearance'], stats['skipped']))

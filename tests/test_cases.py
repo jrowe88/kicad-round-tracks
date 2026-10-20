@@ -7,7 +7,10 @@ import unittest
 
 import pcbnew
 
-from round_tracks_board import ClassSetting, ClearanceChecker, Settings, round_board
+from collections import Counter
+
+from round_tracks_board import (ClassSetting, ClearanceChecker, Settings, round_board,
+                                summary_text)
 from round_tracks_geom import Arc
 from tests import drc, fixtures
 
@@ -379,6 +382,72 @@ class TestCases(unittest.TestCase):
         _, board = self.load(b)
         stats = round_board(board, Settings({'Default': ClassSetting(False, 2.0)}))
         self.assertEqual(sum(stats.values()), 0)
+
+    def sharp_board(self):
+        b = fixtures.Board()
+        b.track(10, 10, 10.08, 10, 'SIG')
+        b.track(10.08, 10, 10.08, 10.08, 'SIG')   # legs too short for min radius
+        return self.load(b)
+
+    def warning_groups(self, board):
+        return [g for g in board.Groups() if g.GetName() == 'round-tracks-warnings']
+
+    def test_sharp_gets_arrow(self):
+        _, board = self.sharp_board()
+        stats = round_board(board, Settings({'Default': ClassSetting(True, 2.0)}))
+        self.assertEqual(stats['sharp_length'], 1)
+        groups = self.warning_groups(board)
+        self.assertEqual(len(groups), 1)
+        items = list(groups[0].GetItems())
+        texts = [i for i in items if i.GetClass() == 'PCB_TEXT']
+        shapes = [i for i in items if i.GetClass() == 'PCB_SHAPE']
+        self.assertEqual(len(texts), 1)
+        self.assertEqual(texts[0].GetText(), 'round-tracks: too short')
+        self.assertGreaterEqual(len(shapes), 3)
+        for i in items:
+            self.assertEqual(i.GetLayer(), pcbnew.Cmts_User)
+        # Items are on the board, not orphaned.
+        self.assertEqual(sum(1 for d in board.GetDrawings()
+                             if d.GetLayer() == pcbnew.Cmts_User), len(items))
+
+    def test_warning_group_survives_save_load(self):
+        _, board = self.sharp_board()
+        round_board(board, Settings({'Default': ClassSetting(True, 2.0)}))
+        n = len(list(self.warning_groups(board)[0].GetItems()))
+        path = fixtures.save_copy(board, os.path.join(self.dir, 'warn.kicad_pcb'))
+        loaded = pcbnew.LoadBoard(path)
+        groups = self.warning_groups(loaded)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(len(list(groups[0].GetItems())), n)
+
+    def test_rerun_replaces_warning_group(self):
+        _, board = self.sharp_board()
+        settings = Settings({'Default': ClassSetting(True, 2.0)})
+        round_board(board, settings)
+        round_board(board, settings)
+        self.assertEqual(len(self.warning_groups(board)), 1)
+        self.assertEqual(sum(1 for d in board.GetDrawings()
+                             if d.GetLayer() == pcbnew.Cmts_User),
+                         len(list(self.warning_groups(board)[0].GetItems())))
+
+    def test_empty_scope(self):
+        _, board = self.sharp_board()
+        round_board(board, Settings({'Default': ClassSetting(True, 2.0)}))
+        stats = round_board(board, Settings({'Default': ClassSetting(False, 2.0)}))
+        self.assertEqual(sum(stats.values()), 0)
+        self.assertEqual(self.warning_groups(board), [])
+        self.assertEqual(sum(1 for d in board.GetDrawings()
+                             if d.GetLayer() == pcbnew.Cmts_User), 0)
+
+    def test_summary_text(self):
+        stats = Counter(full=130, reduced=9, merged=3, sharp_length=2,
+                        sharp_clearance=1, skipped=4)
+        self.assertEqual(summary_text(stats),
+                         'Rounded 142 corners (130 full, 9 reduced, 3 merged). '
+                         'Left sharp: 2 too short, 1 clearance. Skipped: 4.')
+        self.assertEqual(summary_text(Counter()),
+                         'Rounded 0 corners (0 full, 0 reduced, 0 merged). '
+                         'Left sharp: 0 too short, 0 clearance. Skipped: 0.')
 
 
 if __name__ == '__main__':
