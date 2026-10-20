@@ -93,7 +93,9 @@ class TestCases(unittest.TestCase):
         for name, classes in (
                 ('disabled', {'Default': ClassSetting(False, 2.0),
                               'Power': ClassSetting(True, 2.0)}),
-                ('missing', {'Power': ClassSetting(True, 2.0)})):
+                ('missing', {'Power': ClassSetting(True, 2.0)}),
+                ('zero radius', {'Default': ClassSetting(True, 0.0),     # rounding off,
+                                 'Power': ClassSetting(True, 2.0)})):    # not a sea of arrows
             with self.subTest(name):
                 self.dir = tempfile.mkdtemp()
                 self.addCleanup(shutil.rmtree, self.dir, True)
@@ -106,10 +108,28 @@ class TestCases(unittest.TestCase):
                 _, board = self.load(b, {'Power': {'clearance': 0.2}}, [('Power', 'GND')])
                 sig = geometry(board, 'SIG')
 
-                round_board(board, Settings(classes))
+                stats = round_board(board, Settings(classes))
 
                 self.assertEqual(geometry(board, 'SIG'), sig)
                 self.assertEqual([a.GetNetname() for a in arcs(board)], ['GND'])
+                self.assertEqual((stats['full'], stats['sharp_length']), (1, 0))
+                self.assertEqual(self.warning_groups(board), [])
+
+    def test_progress_called_per_net(self):
+        b = fixtures.Board()
+        b.track(10, 10, 30, 10, 'GND')
+        b.track(30, 10, 30, 30, 'GND')
+        b.track(50, 10, 70, 10, 'SIG')
+        b.track(70, 10, 70, 30, 'SIG')
+        b.track(50, 40, 70, 40, 'SIG', layer=pcbnew.B_Cu)
+        _, board = self.load(b)
+        messages = []
+        round_board(board, Settings({'Default': ClassSetting(True, 2.0)}),
+                    progress=messages.append)
+        self.assertEqual(len(messages), 3)                 # one per net and layer
+        self.assertEqual(sum('GND' in m for m in messages), 1)
+        self.assertEqual(sum('SIG' in m for m in messages), 2)
+        self.assertTrue(messages[-1].endswith('(3 of 3)'), messages)
 
     def test_selection_only(self):
         b = fixtures.Board()
@@ -203,21 +223,27 @@ class TestCases(unittest.TestCase):
         b.track(10, 10, 30, 10, net, layer)
         b.track(30, 10, 30, 30, net, layer)
 
-    def round_and_check(self, b, radius=3.0, min_radius=0.1):
-        """Load, DRC, round, DRC again: no new clearance-family violation."""
+    def round_and_check(self, b, radius=3.0, min_radius=0.1, branches=()):
+        """Load, DRC, round, DRC again: no new clearance-family violation, and no
+        new dangling or unconnected item."""
         path, board = self.load(b)
-        before = drc.clearance_violations(drc.run(path))
+        report = drc.run(path)
+        before, links = drc.clearance_violations(report), drc.connectivity(report)
         stats = round_board(board, Settings({'Default': ClassSetting(True, radius)},
                                             min_radius_mm=min_radius))
-        fixtures.assert_tangent(self, board)
+        fixtures.assert_tangent(self, board, branches=branches)
         nets = [t.GetNetname() for t in board.GetTracks()]
         after_path = fixtures.save_copy(board, os.path.join(self.dir, 'after.kicad_pcb'))
         # An arc that shorts onto another net's pad or via makes SaveBoard hand
         # that net to the whole chain, which would hide the short from DRC.
         self.assertEqual([t.GetNetname() for t in board.GetTracks()], nets)
-        after = drc.clearance_violations(drc.run(after_path))
+        report = drc.run(after_path)
+        after = drc.clearance_violations(report)
         self.assertEqual(sorted(v['type'] for v in after), sorted(v['type'] for v in before),
                          after)
+        # Nothing new; an arc may join a stray same-net item, which only helps.
+        self.assertEqual(Counter(drc.connectivity(report)) - Counter(links), Counter(),
+                         report['violations'])
         return board, stats
 
     def assert_shrunk(self, board, stats, below=3.0, above=0.1):
@@ -360,6 +386,77 @@ class TestCases(unittest.TestCase):
         self.assertEqual((west[1], east[0]), tuple(bar))
         self.assertAlmostEqual(sum(bar) / 2, 30 * MM, delta=2)
         self.assertGreater(bar[1] - bar[0], 0)
+
+    # --- same-net copper attached partway along a leg ------------------------
+    # A 90 degree bend at (30, 10) with pads on its far ends; something of the
+    # same net meets the first leg 0.3 mm (0.5 mm for the pad) before the corner.
+
+    def attached_bend(self, b):
+        b.edge_rect(0, 0, 60, 50)
+        self.bend(b)
+        b.tht_pad(10, 10, 1.5, 0.8, 'SIG')
+        b.tht_pad(30, 30, 1.5, 0.8, 'SIG')
+
+    def test_mid_leg_branch_stays_connected(self):
+        b = fixtures.Board()
+        self.attached_bend(b)
+        b.track(29.7, 10, 29.7, 20, 'SIG')
+        b.tht_pad(29.7, 20, 1.5, 0.8, 'SIG')
+        board, stats = self.round_and_check(b, branches=[(29_700_000, 10 * MM)])
+        r = self.radii(board)
+        self.assertEqual(len(r), 1)
+        self.assertAlmostEqual(r[0], 0.3, delta=0.002)
+
+    def test_mid_leg_via_stays_connected(self):
+        b = fixtures.Board()
+        self.attached_bend(b)
+        b.via(29.7, 10, 'SIG', size=0.4, drill=0.2)
+        b.track(29.7, 10, 29.7, 20, 'SIG', layer=pcbnew.B_Cu)
+        b.tht_pad(29.7, 20, 1.5, 0.8, 'SIG')
+        board, stats = self.round_and_check(b)
+        r = self.radii(board)
+        self.assertEqual(len(r), 1)
+        self.assertAlmostEqual(r[0], 0.3, delta=0.002)
+
+    def test_mid_leg_pad_stays_connected(self):
+        b = fixtures.Board()
+        self.attached_bend(b)
+        b.smd_pad(29.5, 10, 0.4, 0.4, 'SIG')
+        board, stats = self.round_and_check(b)
+        r = self.radii(board)
+        self.assertEqual(len(r), 1)
+        self.assertAlmostEqual(r[0], 0.5, delta=0.002)
+
+    def test_attachment_on_merge_run_inner_segment(self):
+        b = fixtures.Board()
+        b.edge_rect(0, 0, 60, 50)
+        self.close_45s(b, 10, 10)             # 0.3 mm diagonal from (20, 10)
+        d = 0.15 / math.sqrt(2)
+        b.via(20 + d, 10 + d, 'SIG', size=0.4, drill=0.2)
+        b.track(20 + d, 10 + d, 20 + d, 30, 'SIG', layer=pcbnew.B_Cu)
+        b.tht_pad(20 + d, 30, 1.5, 0.8, 'SIG')
+        b.tht_pad(10, 10, 1.5, 0.8, 'SIG')
+        b.tht_pad(20 + 2 * d, 20, 1.5, 0.8, 'SIG')
+        board, stats = self.round_and_check(b, radius=2.0)
+        self.assertEqual(stats['merged'], 0)
+        self.assertEqual(len(self.radii(board)), 2)
+
+    def test_performance_many_pads_one_net(self):
+        # 2000 corners and 1500 pads on one net: pads must not be asked per corner.
+        b = fixtures.Board()
+        for i in range(2000):
+            x, y = (i % 50) * 4, (i // 50) * 4
+            b.track(x, y, x + 2, y, 'GND')
+            b.track(x + 2, y, x + 2, y + 2, 'GND')
+            if i < 1500:
+                b.smd_pad(x + 3, y + 3, 0.5, 0.5, 'GND')
+        _, board = self.load(b)
+        start = time.perf_counter()
+        stats = round_board(board, Settings({'Default': ClassSetting(True, 1.0)}))
+        elapsed = time.perf_counter() - start
+        print('\n2000 corners, 1500 pads: %.2f s, %s' % (elapsed, dict(stats)))
+        self.assertEqual(stats['full'], 2000)
+        self.assertLess(elapsed, 10)
 
     def test_performance_500_corners(self):
         b = fixtures.Board()

@@ -10,10 +10,8 @@ import pcbnew
 
 try:
     from .round_tracks_geom import Seg, STAT_KEYS, plan_fillets
-    from .round_tracks_utils import withinPadPoints
 except ImportError:
     from round_tracks_geom import Seg, STAT_KEYS, plan_fillets
-    from round_tracks_utils import withinPadPoints
 
 
 @dataclass
@@ -53,24 +51,9 @@ def _scaling_by_net(board, settings):
         if code == 0:
             continue
         cs = settings.classes.get(primary_class(net))
-        if cs is not None and cs.do_round:
+        if cs is not None and cs.do_round and cs.radius_mm > 0:
             scaling[code] = pcbnew.FromMM(cs.radius_mm)
     return scaling
-
-
-def _pad_anchors(segs, pads, layer):
-    """Shared track ends inside a same-net pad that the tracks leave (legacy withinPad)."""
-    meeting = {}
-    for s in segs:
-        meeting.setdefault(s.a, []).append(s.b)
-        meeting.setdefault(s.b, []).append(s.a)
-    anchors = set()
-    for point, far_ends in meeting.items():
-        if len(far_ends) < 2:
-            continue
-        if any(p.IsOnLayer(layer) and withinPadPoints(p, point, far_ends) for p in pads):
-            anchors.add(point)
-    return anchors
 
 
 _ANY_NET = -1        # obstacle net for board edges and keepouts: blocks every net
@@ -126,6 +109,103 @@ class _LayerIndex:
                         seen.add(id(ob))
                         yield ob
         yield from self.big
+
+
+class _Copper:
+    """A same-net pad or via as plain numbers: its bounding box and position."""
+    __slots__ = ('box', 'pos', 'gap')
+
+    def __init__(self, item):
+        box = item.GetBoundingBox()
+        self.box = (box.GetLeft(), box.GetTop(), box.GetRight(), box.GetBottom())
+        self.pos = _pt(item.GetPosition())
+        self.gap = 0
+
+
+def _contains(box, p):
+    """Inclusive, like BOX2I::Contains."""
+    return box[0] <= p[0] <= box[2] and box[1] <= p[1] <= box[3]
+
+
+def _copper_by_layer(items, layers):
+    """(net, layer) -> [_Copper] for each pad or via on each of `layers`."""
+    out = {}
+    for item in items:
+        copper = None
+        for layer in layers:
+            if item.IsOnLayer(layer):
+                copper = copper or _Copper(item)
+                out.setdefault((item.GetNetCode(), layer), []).append(copper)
+    return out
+
+
+def _copper_index(items):
+    index = _LayerIndex()
+    for item in items:
+        index.add(item)
+    return index
+
+
+def _pad_anchors(segs, pads):
+    """Shared track ends inside a same-net pad that the tracks leave (legacy withinPad).
+
+    `pads` is a _LayerIndex of the net's _Copper pads on the segments' layer.
+    """
+    meeting = {}
+    for s in segs:
+        meeting.setdefault(s.a, []).append(s.b)
+        meeting.setdefault(s.b, []).append(s.a)
+    anchors = set()
+    for point, far_ends in meeting.items():
+        if len(far_ends) < 2:
+            continue
+        for pad in pads.near(point + point, 0):
+            if (_contains(pad.box, point)
+                    and not any(_contains(pad.box, f) for f in far_ends)):
+                anchors.add(point)
+                break
+    return anchors
+
+
+def _clip(a, b, box):
+    """Parameter range (t0, t1) of segment a-b inside `box`, or None."""
+    t0, t1 = 0.0, 1.0
+    dx, dy = b[0] - a[0], b[1] - a[1]
+    for p, q in ((-dx, a[0] - box[0]), (dx, box[2] - a[0]),
+                 (-dy, a[1] - box[1]), (dy, box[3] - a[1])):
+        if p == 0:
+            if q < 0:
+                return None
+        elif p < 0:
+            t0 = max(t0, q / p)
+        else:
+            t1 = min(t1, q / p)
+    return (t0, t1) if t0 <= t1 else None
+
+
+def _copper_points(segs, copper):
+    """Where same-net pads and vias meet the segments' centrelines.
+
+    For each segment crossing an item's bounding box: the item's position
+    projected onto the segment, kept inside the part of it within the box (the
+    position itself when it lies on the segment). `copper` is a _LayerIndex.
+    """
+    points = set()
+    for s in segs:
+        box = (min(s.a[0], s.b[0]), min(s.a[1], s.b[1]),
+               max(s.a[0], s.b[0]), max(s.a[1], s.b[1]))
+        dx, dy = s.b[0] - s.a[0], s.b[1] - s.a[1]
+        length2 = dx * dx + dy * dy
+        if length2 == 0:
+            continue
+        for item in copper.near(box, 0):
+            inside = _clip(s.a, s.b, item.box)
+            if inside is None:
+                continue
+            t = ((item.pos[0] - s.a[0]) * dx + (item.pos[1] - s.a[1]) * dy) / length2
+            t = min(max(t, inside[0]), inside[1])
+            points.add((round(s.a[0] + t * dx), round(s.a[1] + t * dy)))
+    return points
 
 
 class ClearanceChecker:
@@ -233,11 +313,12 @@ class ClearanceChecker:
                                              self._gap(arc), True, item))
 
 
-def round_board(board, settings, fits=None):
+def round_board(board, settings, fits=None, progress=None):
     """Fillet every in-scope corner of `board` and return the run's stats Counter.
 
     `fits` defaults to a ClearanceChecker over the board (whose accepted arcs
-    then block later ones); a custom `fits` is used as is.
+    then block later ones); a custom `fits` is used as is. `progress(message)`,
+    if given, is called before each net is planned.
     """
     on_accept = None
     if fits is None:
@@ -250,13 +331,16 @@ def round_board(board, settings, fits=None):
     def group(net, layer):
         return groups.setdefault((net, layer), {'segs': [], 'anchors': set()})
 
-    vias, arcs = [], []
+    vias, arc_ends = [], {}  # same-net vias; (net, layer) -> existing arc ends
     for t in board.GetTracks():
         cls = t.GetClass()
         if cls == 'PCB_VIA':
-            vias.append(t)
+            if t.GetNetCode() in scaling:
+                vias.append(t)
         elif cls == 'PCB_ARC':
-            arcs.append(t)
+            if t.GetNetCode() in scaling:
+                arc_ends.setdefault((t.GetNetCode(), t.GetLayer()), set()).update(
+                    (_pt(t.GetStart()), _pt(t.GetEnd())))
         elif cls == 'PCB_TRACK':
             net, layer = t.GetNetCode(), t.GetLayer()
             in_scope = net in scaling and (not settings.only_selection or t.IsSelected())
@@ -270,24 +354,28 @@ def round_board(board, settings, fits=None):
 
     stats = Counter(dict.fromkeys(STAT_KEYS, 0))
     min_radius_nm = pcbnew.FromMM(settings.min_radius_mm)
-    pads_by_net = {}
-    for p in board.GetPads():  # selection never matters: pads protect connectivity
-        pads_by_net.setdefault(p.GetNetCode(), []).append(p)
+    # Pads and vias are read from pcbnew once per run, not once per corner.
+    # Selection never matters: they protect connectivity.
+    layers = {layer for _, layer in groups}
+    pads = _copper_by_layer([p for p in board.GetPads() if p.GetNetCode() in scaling], layers)
+    via_copper = _copper_by_layer(vias, layers)
+    todo = [(key, g) for key, g in sorted(groups.items()) if g['segs']]
+    names = ({code: net.GetNetname() for code, net in board.GetNetsByNetcode().items()}
+             if progress else {})
 
     plans = []
-    for (net, layer), g in sorted(groups.items()):
+    for n, (key, g) in enumerate(todo):
+        if progress:
+            progress('Rounding net %s (%d of %d)' % (names.get(key[0], key[0]), n + 1, len(todo)))
         segs = g['segs']
-        if not segs:
-            continue
-        anchors = set(g['anchors'])
-        anchors.update(_pt(v.GetPosition()) for v in vias
-                       if v.GetNetCode() == net and v.IsOnLayer(layer))
-        for a in arcs:
-            if a.GetNetCode() == net and a.GetLayer() == layer:
-                anchors.update((_pt(a.GetStart()), _pt(a.GetEnd())))
-        anchors |= _pad_anchors(segs, pads_by_net.get(net, []), layer)
-        plans.append(plan_fillets(segs, anchors, {net: scaling[net]}, min_radius_nm, fits,
-                                  settings.avoid_junctions, on_accept))
+        pad_items, via_items = pads.get(key, []), via_copper.get(key, [])
+        ends = g['anchors'] | arc_ends.get(key, set())  # other same-net track and arc ends
+        anchors = ends | {v.pos for v in via_items}
+        anchors |= _pad_anchors(segs, _copper_index(pad_items))
+        attach = ends | _copper_points(segs, _copper_index(pad_items + via_items))
+        plans.append(plan_fillets(segs, anchors, {key[0]: scaling[key[0]]}, min_radius_nm,
+                                  fits, settings.avoid_junctions, on_accept,
+                                  attach_points=attach))
     # Compute everything first, then touch the board.
     sharps = []
     for plan in plans:

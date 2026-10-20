@@ -31,3 +31,9 @@ def run(path, timeout=300):
 
 def clearance_violations(report):
     return [v for v in report['violations'] if v['type'] in CLEARANCE_TYPES]
+
+
+def connectivity(report):
+    """Dangling-item violation types, plus one 'unconnected' per unconnected pair."""
+    return sorted([v['type'] for v in report['violations'] if 'dangling' in v['type']]
+                  + ['unconnected'] * len(report.get('unconnected_items', [])))

@@ -175,11 +175,13 @@ def _cos(u, w):
     return (u[0] * w[0] + u[1] * w[1]) / (nu * nw)
 
 
-def assert_tangent(test, board, min_len=1000):
+def assert_tangent(test, board, min_len=1000, branches=()):
     """Every PCB_ARC end meets a PCB_TRACK end (or another arc's end) tangentially.
 
     Tracks shorter than `min_len` nm have no reliable direction; they count for
-    the meeting but not for the perpendicularity check.
+    the meeting but not for the perpendicularity check. At a point in `branches`
+    (nm), where a branch track meets the leg an arc stops at, the other tracks
+    may leave at any angle as long as one meeting track is tangent.
     """
     tracks = [t for t in board.GetTracks() if t.GetClass() == 'PCB_TRACK']
     arcs = [t for t in board.GetTracks() if t.GetClass() == 'PCB_ARC']
@@ -188,6 +190,7 @@ def assert_tangent(test, board, min_len=1000):
         for end in (_pt(arc.GetStart()), _pt(arc.GetEnd())):
             radius = (end[0] - c[0], end[1] - c[1])
             met = False
+            tangent = []
             for t in tracks:
                 if t.GetLayer() != arc.GetLayer() or t.GetNetCode() != arc.GetNetCode():
                     continue
@@ -198,8 +201,12 @@ def assert_tangent(test, board, min_len=1000):
                 far = e if end == s else s
                 if math.dist(s, e) >= min_len:
                     direction = (end[0] - far[0], end[1] - far[1])
-                    test.assertLess(abs(_cos(radius, direction)), 1e-3,
-                                    'arc at %s not tangent to track %s-%s' % (end, s, e))
+                    ok = abs(_cos(radius, direction)) < 1e-3
+                    tangent.append(ok)
+                    if end not in branches:
+                        test.assertTrue(ok, 'arc at %s not tangent to track %s-%s' % (end, s, e))
+            if end in branches:
+                test.assertTrue(any(tangent), 'arc at branch %s tangent to no track' % (end,))
             for other in arcs:
                 if other is arc or other.GetLayer() != arc.GetLayer():
                     continue
