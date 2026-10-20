@@ -171,8 +171,10 @@ Two layers, both runnable from the command line with KiCad's bundled Python
 2. **Case tests**: each case builds a small synthetic board in code with `pcbnew`, runs
    `round_board` headless, then asserts on the result. Assertions cover arc count,
    radii, which corners stayed sharp and why, warning-arrow count, connectivity
-   unchanged, and every arc tangent to its neighbours. Each case also runs
-   `WriteDRCReport` and asserts no *new* clearance violations. Cases:
+   unchanged, and every arc tangent to its neighbours. Each case also runs DRC with
+   `kicad-cli pcb drc --format json` and asserts no *new* clearance violations
+   (`pcbnew.WriteDRCReport` crashes without a running KiCad, found while planning).
+   Cases:
    - plain 90° corner, and 45° corner (radius semantics);
    - hidden sliver / collinear fragment just before a corner (problem 1);
    - 45° stair-step with short treads (problems 2, 3);
