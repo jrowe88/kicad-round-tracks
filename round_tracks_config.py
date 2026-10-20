@@ -5,6 +5,8 @@
 # "passes" column (written as 3, ignored on read) and the checkbox line keeps
 # three bools. The extra "min_radius" line is silently ignored by upstream.
 
+import math
+
 try:
     from .round_tracks_board import ClassSetting, Settings
 except ImportError:
@@ -12,6 +14,15 @@ except ImportError:
 
 MIN_RADIUS_DEFAULT = 0.1
 LEGACY_PASSES = 3
+
+
+def parse_length(text, default):
+    """A finite, non-negative number of mm from `text`, else `default`."""
+    try:
+        value = float(text)
+    except (TypeError, ValueError):
+        return default
+    return value if math.isfinite(value) and value >= 0 else default
 
 
 def _checkbox_fields(text):
@@ -23,20 +34,21 @@ def _checkbox_fields(text):
 
 
 def parse_config(text):
-    """Parse config text into Settings; malformed lines are skipped."""
+    """Parse config text into Settings; malformed lines are skipped.
+
+    A radius that isn't a finite, non-negative number is dropped so the default
+    applies (for a class line, the dialog's default radius).
+    """
     classes = {}
     min_radius = MIN_RADIUS_DEFAULT
     for line in text.splitlines():
         params = line.split("\t")
-        try:
-            if params[0] == "min_radius" and len(params) == 2:
-                value = float(params[1])
-                if value >= 0:
-                    min_radius = value
-            elif len(params) >= 3 and params[1] in ("True", "False") and params[0]:
-                classes[params[0]] = ClassSetting(params[1] == "True", float(params[2]))
-        except (ValueError, IndexError):
-            pass
+        if params[0] == "min_radius" and len(params) == 2:
+            min_radius = parse_length(params[1], MIN_RADIUS_DEFAULT)
+        elif len(params) >= 3 and params[1] in ("True", "False") and params[0]:
+            radius = parse_length(params[2], None)
+            if radius is not None:
+                classes[params[0]] = ClassSetting(params[1] == "True", radius)
     boxes = _checkbox_fields(text)
     avoid = boxes is not None and boxes[2] == "True"
     return Settings(classes=classes, min_radius_mm=min_radius, avoid_junctions=avoid)

@@ -20,16 +20,19 @@ import math
 import os
 import wx
 import time
+import traceback
 try:
     from .round_tracks_utils import *
     from .round_tracks_gui import RoundTracksDialog
     from .round_tracks_board import ClassSetting, Settings, round_board, summary_text
-    from .round_tracks_config import parse_config, read_new_file, format_config, MIN_RADIUS_DEFAULT
+    from .round_tracks_config import (parse_config, parse_length, read_new_file, format_config,
+                                      MIN_RADIUS_DEFAULT)
 except ImportError:
     from round_tracks_utils import *
     from round_tracks_gui import RoundTracksDialog
     from round_tracks_board import ClassSetting, Settings, round_board, summary_text
-    from round_tracks_config import parse_config, read_new_file, format_config, MIN_RADIUS_DEFAULT
+    from round_tracks_config import (parse_config, parse_length, read_new_file, format_config,
+                                     MIN_RADIUS_DEFAULT)
 
 RADIUS_DEFAULT = 2.0
 
@@ -44,7 +47,7 @@ class RoundTracks(RoundTracksDialog):
         self.configfilepath = self.basefilename+".round-tracks-config"
         self.action = action
         self.netClassCount = 1
-        self.settings = Settings()
+        self.prog = None
         text = self.read_config_text()
         self.settings = parse_config(text)
         self.do_create.SetValue(read_new_file(text))
@@ -64,43 +67,88 @@ class RoundTracks(RoundTracksDialog):
 
     def run( self, event ):
         start = time.time()
+        label = self.apply.GetLabel()
         self.apply.SetLabel("Working...")
-        self.validate_all_data()
-        self.save_config()
+        self.prog = None
+        try:
+            self.validate_all_data()
+            self.save_config()
 
-        self.prog = wx.ProgressDialog("Processing", "Rounding tracks...", 100, self, wx.PD_AUTO_HIDE|wx.PD_APP_MODAL|wx.PD_ELAPSED_TIME)
-        self.prog.Pulse("Rounding tracks...")
+            self.prog = wx.ProgressDialog("Processing", "Rounding tracks...", 100, self, wx.PD_AUTO_HIDE|wx.PD_APP_MODAL|wx.PD_ELAPSED_TIME)
+            self.prog.Pulse("Rounding tracks...")
 
-        if self.do_create.IsChecked():
-            new_name = self.basefilename+"-rounded.kicad_pcb"
-            self.board.SetFileName(new_name)
+            if self.do_create.IsChecked():
+                new_name = self.basefilename+"-rounded.kicad_pcb"
+                self.board.SetFileName(new_name)
 
-        anySelected = False
-        for t in self.board.GetTracks():
-            if t.IsSelected():
-                anySelected = True
-                break
+            anySelected = False
+            for t in self.board.GetTracks():
+                if t.IsSelected():
+                    anySelected = True
+                    break
 
-        self.settings.only_selection = anySelected
-        stats = round_board(self.board, self.settings)
+            self.settings.only_selection = anySelected
+            stats = round_board(self.board, self.settings, progress=self.pulse)
 
-        # if m_AutoRefillZones is set, we should skip here, but PCBNEW_SETTINGS is not exposed to swig
-        # ZONE_FILLER has SetProgressReporter, but PROGRESS_REPORTER is also not available, so we can't use it
-        # even zone.SetNeedRefill(False) doesn't prevent it running twice
-        #self.prog.Pulse("Rebuilding zones...")
-        #wx.Yield()
-        #filler = pcbnew.ZONE_FILLER(self.board)
-        #filler.Fill(self.board.Zones())
+            # if m_AutoRefillZones is set, we should skip here, but PCBNEW_SETTINGS is not exposed to swig
+            # ZONE_FILLER has SetProgressReporter, but PROGRESS_REPORTER is also not available, so we can't use it
+            # even zone.SetNeedRefill(False) doesn't prevent it running twice
+            #self.prog.Pulse("Rebuilding zones...")
+            #wx.Yield()
+            #filler = pcbnew.ZONE_FILLER(self.board)
+            #filler.Fill(self.board.Zones())
+        except Exception:
+            self.close_progress()
+            self.report_error("Rounding failed.")
+            return
+        finally:
+            self.close_progress()
+            self.apply.SetLabel(label)
 
-        if bool(self.prog):
-            self.prog.Destroy()
-            wx.Yield()
         wx.MessageBox("Done, took {:.3f} seconds\n\n{}".format(time.time()-start, summary_text(stats)), parent=self)
         self.EndModal(wx.ID_OK)
 
+    def pulse(self, message):
+        """Progress callback for round_board: one pulse per net."""
+        if self.prog:
+            self.prog.Pulse(message)
+            wx.Yield()
+
+    def close_progress(self):
+        if self.prog:
+            self.prog.Destroy()
+            self.prog = None
+            wx.Yield()
+
+    def report_error(self, what):
+        wx.MessageBox(what + " The board may be partly changed; Undo (Ctrl+Z) puts it back.\n\n"
+                      + traceback.format_exc(), "Round tracks", wx.OK | wx.ICON_ERROR, parent=self)
+
 
     def unrun( self, event ):
+        try:
+            removed, hairpins = self.unround_arcs()
+        except Exception:
+            self.report_error("Unround failed.")
+            return
 
+        if removed or hairpins:
+            lines = []
+            if hairpins:
+                lines.append("%d hairpin arc%s (turning nearly 180 degrees) left in place: the corner %s came from is too far away to recover."
+                             % (hairpins, "" if hairpins == 1 else "s", "it" if hairpins == 1 else "they"))
+            if removed:
+                lines.append("%d arc%s with a nonsensical angle (usually a very, very small arc) removed."
+                             % (removed, "" if removed == 1 else "s"))
+            wx.MessageBox("Some arcs failed to unround.\n\n" + "\n\n".join(lines), style=wx.ICON_ERROR)
+
+        wx.MessageBox("Unrounded!\n\nPlease note, due to rounding errors, a round trip may not exactly match the original.", parent=self)
+
+        self.EndModal(wx.ID_OK)
+
+
+    def unround_arcs(self):
+        """Turn arcs back into corners; return (arcs removed, hairpin arcs left alone)."""
         anySelected = False
         for t in self.board.GetTracks():
             if t.IsSelected():
@@ -115,7 +163,8 @@ class RoundTracks(RoundTracksDialog):
         tracksEndsToExtend = []
         tracksToAdd = []
         tracksToRemove = []
-        fail=False
+        removed = 0
+        hairpins = 0
 
         def findExtendTrack( pos, angle, intersection, tracksInNet, arc ):
             angle = normalizeAngle(angle)
@@ -170,12 +219,13 @@ class RoundTracks(RoundTracksDialog):
                 halfAngle = a.GetAngle().AsRadians()/2
                 interdistance = a.GetRadius() / math.cos(halfAngle)
                 if interdistance > 2**32:
-                    fail=True
+                    removed += 1
                     tracksToRemove.append(a)
                     continue
                 if interdistance > 10 * a.GetRadius():
-                    # nearly-straight arc: the corner it came from is too far away to recover
-                    fail=True
+                    # hairpin arc (turning nearly 180 degrees): the corner it came
+                    # from is too far away to recover, so it stays as it is
+                    hairpins += 1
                     continue
                 if a.IsCCW():
                     interAngle = startAngle +halfAngle
@@ -255,12 +305,7 @@ class RoundTracks(RoundTracksDialog):
         for t in tracksToRemove:
             board.Remove(t)
 
-        if fail:
-            wx.MessageBox("Some arcs failed to unround.\n\nThis is usually caused by very, very small arcs, or nearly-straight arcs, which have nonsensical angles. Nearly-straight arcs were left in place.", style=wx.ICON_ERROR)
-
-        wx.MessageBox("Unrounded!\n\nPlease note, due to rounding errors, a round trip may not exactly match the original.", parent=self)
-
-        self.EndModal(wx.ID_OK)
+        return removed, hairpins
 
 
     def on_close( self, event ):
@@ -289,20 +334,14 @@ class RoundTracks(RoundTracksDialog):
     def validate_all_data (self):
         classes = {}
         for i in range(self.netClassCount):
-            try:
-                radius = float(self.netclasslist.GetTextValue(i, 2))
-                if radius < 0:
-                    raise ValueError
-            except Exception as e:
+            radius = parse_length(self.netclasslist.GetTextValue(i, 2), None)
+            if radius is None:
                 radius = RADIUS_DEFAULT
                 self.netclasslist.SetTextValue(str(RADIUS_DEFAULT), i, 2)
             classes[self.netclasslist.GetTextValue(i, 0)] = ClassSetting(
                 self.netclasslist.GetToggleValue(i, 1), radius)
-        try:
-            min_radius = float(self.min_radius.GetValue())
-            if min_radius < 0:
-                raise ValueError
-        except Exception as e:
+        min_radius = parse_length(self.min_radius.GetValue(), None)
+        if min_radius is None:
             min_radius = MIN_RADIUS_DEFAULT
             self.min_radius.SetValue(str(MIN_RADIUS_DEFAULT))
         self.settings = Settings(classes=classes, min_radius_mm=min_radius,

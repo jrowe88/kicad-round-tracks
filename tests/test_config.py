@@ -1,7 +1,7 @@
 import unittest
 
 from round_tracks_board import ClassSetting, Settings
-from round_tracks_config import parse_config, format_config, read_new_file
+from round_tracks_config import parse_config, format_config, read_new_file, parse_length
 
 
 def upstream_load_config(text):
@@ -65,6 +65,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(s.classes, {})
         self.assertEqual(s.min_radius_mm, 0.1)
         self.assertFalse(read_new_file(""))
+
+    def test_non_finite_and_negative_values_rejected(self):
+        for bad in ('nan', 'inf', '-inf', '-1', '1e999'):
+            with self.subTest(bad=bad):
+                s = parse_config("Default\tTrue\t%s\t3\nPower\tTrue\t1.5\t3\n"
+                                 "min_radius\t%s\n" % (bad, bad))
+                self.assertNotIn('Default', s.classes)    # the dialog's default applies
+                self.assertEqual(s.classes['Power'], ClassSetting(True, 1.5))
+                self.assertEqual(s.min_radius_mm, 0.1)
+
+    def test_parse_length(self):
+        self.assertEqual(parse_length('2.5', 1.0), 2.5)
+        self.assertEqual(parse_length(' 0 ', 1.0), 0.0)
+        for bad in ('nan', 'NaN', 'inf', '-inf', '-1', '-0.001', 'abc', '', None):
+            with self.subTest(bad=bad):
+                self.assertEqual(parse_length(bad, 1.0), 1.0)
 
 
 if __name__ == '__main__':
