@@ -25,19 +25,23 @@ def similarAngle(a1,a2):
     return (abs(diff)<angleTolerance)
 
 # test if an intersection is within the bounds of a pad
+# tracks must start at the intersection (their ends are the far ends)
 def withinPad(pad, a, tracks):
+    return withinPadPoints(pad, (a.x, a.y), [(t.GetEnd().x, t.GetEnd().y) for t in tracks])
+
+# same test on (x, y) points: the intersection and the far ends of its tracks
+def withinPadPoints(pad, a, farEnds):
     # Bounding box is probably sufficient, unless we had a giant L-shaped pad or something
     box = pad.GetBoundingBox()
-    if not box.Contains(a):
+    if not box.Contains(pcbnew.VECTOR2I(*a)):
         return False
 
     # If the intersection is within the pad, return true
     # But if one of the connected tracks is *entirely* within the pad, return false, since rounding won't break connectivity
-    inside = True
-    for t in tracks:
-        if box.Contains(t.GetEnd()):
-            inside = False
-    return inside
+    for p in farEnds:
+        if box.Contains(pcbnew.VECTOR2I(*p)):
+            return False
+    return True
 
 
 # shortens a track by an arbitrary amount, maintaining the angle and the endpoint
