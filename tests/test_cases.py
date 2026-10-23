@@ -789,5 +789,42 @@ class TestCases(unittest.TestCase):
                     self.assertEqual(len(tips), 3)          # shaft and head meet at the tip
 
 
+    # --- DRC epsilon: copper routed at exactly minimum spacing ---------------
+
+    def test_pair_at_min_spacing_rounds(self):
+        # Two nets 0.45 mm apart centre to centre (0.25 mm tracks, 0.2 mm
+        # clearance), both bending 45 degrees like a USB pair. The arcs' tangent
+        # ends lie on legs already exactly at clearance from the other net.
+        b = fixtures.Board()
+        self.polyline(b, [(10, 10), (30, 10), (40, 20)], 'DP')
+        corner = 30 - 0.45 * math.tan(math.radians(22.5))
+        self.polyline(b, [(10, 10.45), (corner, 10.45), (corner + 9.5, 19.95)], 'DN')
+        board, stats = self.round_and_check(b, radius=1.0)
+        self.assertEqual((stats['sharp_clearance'], stats['sharp_length']), (0, 0))
+        for net in ('DP', 'DN'):
+            r = self.radii(board, net)
+            self.assertEqual(len(r), 1, net)
+            self.assertGreater(r[0], 0.1, net)
+
+    def test_bend_past_obstacle_at_exact_clearance(self):
+        # A 90 degree bend whose full 2 mm arc starts at (28, 10), right next to
+        # another net's via (copper clearance) or an NPTH (hole clearance) sitting
+        # outside the bend at exactly the required distance from the leg.
+        for name, add in (
+                ('via', lambda b: b.via(28, 10 - (0.3 + 0.2 + 0.125), 'OTHER')),
+                ('npth', lambda b: b.npth(28, 10 - (0.3 + 0.25 + 0.125), 0.6))):
+            with self.subTest(name):
+                self.dir = tempfile.mkdtemp()
+                self.addCleanup(shutil.rmtree, self.dir, True)
+                b = fixtures.Board()
+                self.bend(b)
+                add(b)
+                board, stats = self.round_and_check(b, radius=2.0)
+                self.assertEqual(stats['full'], 1)
+                r = self.radii(board)
+                self.assertEqual(len(r), 1)
+                self.assertAlmostEqual(r[0], 2.0, delta=0.002)
+
+
 if __name__ == '__main__':
     unittest.main()

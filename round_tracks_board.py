@@ -59,7 +59,11 @@ def _scaling_by_net(board, settings):
 _ANY_NET = -1        # obstacle net for board edges and keepouts: blocks every net
 _CELL = 2_000_000    # grid cell size of the obstacle index, nm
 _BIG = 64            # obstacles spanning more cells than this are kept in a plain list
-_MARGIN = 1_000      # nm added to every required gap, against arc approximation error
+# KiCad's DRC accepts a gap up to its epsilon (0.0005 mm, BOARD_DESIGN_SETTINGS::
+# GetDRCEpsilon) short of the rule: kicad-cli 10.0.7 passes copper, hole and edge
+# gaps 500 nm short and flags them 501 nm short. Half of that keeps a margin for
+# rounding, so copper routed at exactly minimum spacing can still be rounded.
+DRC_EPSILON_NM = 250
 
 
 def _bbox(shape):
@@ -295,10 +299,11 @@ class ClearanceChecker:
         own = self._gap(arc)
         box = _bbox(shape)
         index = self._index(arc.layer)
-        for ob in index.near(box, max(own, index.max_gap) + _MARGIN):
+        for ob in index.near(box, max(own, index.max_gap)):
             if ob.net == arc.net:
                 continue
-            gap = (max(own, ob.gap) if ob.copper else ob.gap) + _MARGIN
+            # A keepout (gap 0) stays at 0: any overlap fails.
+            gap = max((max(own, ob.gap) if ob.copper else ob.gap) - DRC_EPSILON_NM, 0)
             l, t, r, b = ob.box
             if l - gap > box[2] or r + gap < box[0] or t - gap > box[3] or b + gap < box[1]:
                 continue
