@@ -294,6 +294,16 @@ class TestJogCollapse(unittest.TestCase):
         self.assertEqual(len(p.arcs), 1)
         self.assertLessEqual(max(p.arcs[0].start[0], p.arcs[0].end[0]), 500_000)
 
+    def test_attachment_on_jog_itself_blocks_collapse(self):
+        # The jog is deleted by a collapse: copper attached to its middle
+        # (a via, or a branch's end) would be stranded.
+        mid = (5 * MM + 12_500, 12_500)
+        new, updates, removals = cleanup(jog_b(), {mid}, seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+        segs = jog_b() + [seg(3, mid, (5 * MM + 12_500, 5 * MM))]
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
     def test_plan_reports_moved_segments(self):
         accepted = []
         p = plan_fillets(jog_a(), set(), {1: 2 * MM}, 100_000, lambda a: True, False,

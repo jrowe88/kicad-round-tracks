@@ -197,33 +197,67 @@ def _jog_moves(s, neighbours):
     return None
 
 
-def _on_interior(pt, a, b):
-    """`pt` is within ATTACH_NM of segment a-b's line, strictly between its ends."""
+def _along_interior(pt, a, b):
+    """Distance from `a` along segment a-b to `pt` when `pt` is within ATTACH_NM
+    of its line and strictly between its ends; None otherwise."""
     length = math.dist(a, b)
-    if length == 0:
-        return False
+    if length == 0 or pt == a or pt == b:
+        return None
     dx, dy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
     rx, ry = pt[0] - a[0], pt[1] - a[1]
     along = rx * dx + ry * dy
-    return 0 < along < length and abs(rx * dy - ry * dx) <= ATTACH_NM
+    if 0 < along < length and abs(rx * dy - ry * dx) <= ATTACH_NM:
+        return along
+    return None
 
 
-def _keeps_attachments(original, moved, points):
+def _on_interior(pt, a, b):
+    return _along_interior(pt, a, b) is not None
+
+
+class _PointGrid:
+    """Points bucketed on a grid, to find those near a segment quickly."""
+
+    def __init__(self, points):
+        self.cells = {}
+        for p in points:
+            self.cells.setdefault((p[0] // _ATTACH_CELL, p[1] // _ATTACH_CELL), []).append(p)
+
+    def near(self, a, b):
+        """Every point within ATTACH_NM of segment a-b, maybe with a few more."""
+        length = math.dist(a, b)
+        # Sample at most a cell apart: anything within ATTACH_NM of the segment
+        # is then in a cell next to a sample's.
+        n = int(length // _ATTACH_CELL) + 1
+        cells = set()
+        for k in range(n + 1):
+            cx = int((a[0] + (b[0] - a[0]) * k / n) // _ATTACH_CELL)
+            cy = int((a[1] + (b[1] - a[1]) * k / n) // _ATTACH_CELL)
+            cells.update((cx + i, cy + j) for i in (-1, 0, 1) for j in (-1, 0, 1))
+        for cell in cells:
+            yield from self.cells.get(cell, ())
+
+    def on_interior(self, a, b):
+        return [p for p in self.near(a, b) if _on_interior(p, a, b)]
+
+
+def _keeps_attachments(original, moved, grid):
     """Every point attached to `original`'s interior is still on `moved`'s."""
-    return all(_on_interior(pt, moved.a, moved.b) for pt in points
-               if _on_interior(pt, original.a, original.b))
+    return all(_on_interior(pt, moved.a, moved.b) for pt in grid.on_interior(original.a, original.b))
 
 
 def _try_collapse_jog(segs, index, anchors, seg_fits):
     """Collapse one micro-jog if every moved segment passes `seg_fits`.
 
     A jog is a segment no longer than half its width, with neither end an
-    anchor or free, whose neighbours all share its width. A collapse that
-    tilts a neighbour must not move its line off anything attached partway
-    along it (an anchor or attachment, or another segment's end), or that
-    copper would stop counting as attached and lose its connection. Returns
-    the ids of the moved segments, or None.
+    anchor or free, whose neighbours all share its width. Nothing may be
+    attached partway along the jog (it goes away), and a collapse that tilts
+    a neighbour must not move its line off anything attached partway along it
+    (an anchor or attachment, or another segment's end), or that copper would
+    stop counting as attached and lose its connection. Returns the ids of the
+    moved segments, or None.
     """
+    grid = None
     for s in sorted(segs.values(), key=lambda s: s.id):
         length = math.dist(s.a, s.b)
         if length == 0 or length > s.width / 2 or s.a in anchors or s.b in anchors:
@@ -242,9 +276,11 @@ def _try_collapse_jog(segs, index, anchors, seg_fits):
             m = replace(n)
             _replace_end(m, old, new)
             moved.append(m)
-        points = set(anchors) | {e for o in segs.values() if o.layer == s.layer
-                                 and o.net == s.net for e in (o.a, o.b)}
-        if not all(_keeps_attachments(n, m, points) for (n, _, _), m in zip(moves, moved)):
+        if grid is None:  # once per pass, and only once a candidate gets this far
+            grid = _PointGrid(set(anchors) | {e for o in segs.values() for e in (o.a, o.b)})
+        if grid.on_interior(s.a, s.b):
+            continue
+        if not all(_keeps_attachments(n, m, grid) for (n, _, _), m in zip(moves, moved)):
             continue
         if not all(seg_fits(m) for m in moved):
             continue
@@ -443,32 +479,17 @@ def _attachment_limits(segs, points):
     end are left out. A point is on a segment when it is within ATTACH_NM of its
     line and strictly between its ends.
     """
-    grid = {}
-    for p in points:
-        grid.setdefault((p[0] // _ATTACH_CELL, p[1] // _ATTACH_CELL), []).append(p)
+    grid = _PointGrid(points)
     limits = {}
     for s in segs:
         length = math.dist(s.a, s.b)
         if length == 0:
             continue
-        dx, dy = (s.b[0] - s.a[0]) / length, (s.b[1] - s.a[1]) / length
-        # Sample at most a cell apart: anything within ATTACH_NM of the segment
-        # is then in a cell next to a sample's.
-        n = int(length // _ATTACH_CELL) + 1
-        cells = set()
-        for k in range(n + 1):
-            cx = int((s.a[0] + dx * length * k / n) // _ATTACH_CELL)
-            cy = int((s.a[1] + dy * length * k / n) // _ATTACH_CELL)
-            cells.update((cx + i, cy + j) for i in (-1, 0, 1) for j in (-1, 0, 1))
         near_a = near_b = math.inf
-        for cell in cells:
-            for p in grid.get(cell, ()):
-                if p == s.a or p == s.b:
-                    continue
-                rx, ry = p[0] - s.a[0], p[1] - s.a[1]
-                along = rx * dx + ry * dy
-                if 0 < along < length and abs(rx * dy - ry * dx) <= ATTACH_NM:
-                    near_a, near_b = min(near_a, along), min(near_b, length - along)
+        for p in grid.near(s.a, s.b):
+            along = _along_interior(p, s.a, s.b)
+            if along is not None:
+                near_a, near_b = min(near_a, along), min(near_b, length - along)
         if near_a < math.inf:
             limits[(s.id, s.a)], limits[(s.id, s.b)] = near_a, near_b
     return limits
