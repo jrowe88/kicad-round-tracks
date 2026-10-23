@@ -153,7 +153,7 @@ def _copper_index(items):
 
 
 def _pad_anchors(segs, pads):
-    """Shared track ends on a same-net pad's or via's copper (legacy withinPad).
+    """Shared track ends on a same-net pad's or via's copper.
 
     `pads` is a _LayerIndex of the net's _Copper pads and vias on the segments'
     layer. Rounding there gains nothing (the copper is covered), and where a
@@ -348,8 +348,10 @@ def round_board(board, settings, fits=None, progress=None):
     """Fillet every in-scope corner of `board` and return the run's stats Counter.
 
     `fits` defaults to a ClearanceChecker over the board (whose accepted arcs
-    then block later ones), which also checks and records micro-jog collapses;
-    a custom `fits` is used as is, and jogs are then left alone.
+    then block later ones), which also checks and records micro-jog collapses
+    and junction connectors across slight kinks. A custom `fits` (a test hook)
+    is used as is: jogs are then left alone, and a junction whose connector
+    would cut across a kink is left sharp for clearance.
     `progress(message)`, if given, is called before each net is planned.
     """
     on_accept = seg_fits = on_accept_seg = None

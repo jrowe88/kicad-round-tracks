@@ -393,9 +393,6 @@ class _Bend:
                     self.legs[0].width, self.layer, self.net)
                 for i, j, _ in self._arc_pairs()]
 
-    def tracks(self, setback):
-        return [bar for bar, _ in self.bars(setback)]
-
     def bars(self, setback):
         """(connector Seg, gap) for each straight pair."""
         return [(Seg(-1, point_along(self.point, self._far(i), setback),
@@ -773,7 +770,7 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
             plan.arcs.append(arc)
             if on_accept:
                 on_accept(arc)
-        for bar in b.tracks(setback):
+        for bar, _ in b.bars(setback):
             plan.tracks.append(bar)
             if on_accept_seg:
                 on_accept_seg(bar)
