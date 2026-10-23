@@ -14,7 +14,7 @@ cp icon.png resources/
 
 mkdir plugins
 cp *.py plugins/
-cp round_tracks.png plugins/
+cp round_tracks.png round_tracks_dark.png plugins/
 
 zip -r $name plugins resources metadata.json
 
