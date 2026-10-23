@@ -151,9 +151,12 @@ def _copper_index(items):
 
 
 def _pad_anchors(segs, pads):
-    """Shared track ends inside a same-net pad that the tracks leave (legacy withinPad).
+    """Shared track ends inside a same-net pad or via (legacy withinPad).
 
-    `pads` is a _LayerIndex of the net's _Copper pads on the segments' layer.
+    `pads` is a _LayerIndex of the net's _Copper pads and vias on the segments'
+    layer. Rounding there gains nothing (the copper is covered), and where a
+    stub runs on to the pad's centre it would leave an arc lying wholly in the
+    pad and ending on it alone, which KiCad's DRC reports as dangling.
     """
     meeting = {}
     for s in segs:
@@ -164,8 +167,7 @@ def _pad_anchors(segs, pads):
         if len(far_ends) < 2:
             continue
         for pad in pads.near(point + point, 0):
-            if (_contains(pad.box, point)
-                    and not any(_contains(pad.box, f) for f in far_ends)):
+            if _contains(pad.box, point):
                 anchors.add(point)
                 break
     return anchors
@@ -400,7 +402,7 @@ def round_board(board, settings, fits=None, progress=None):
         pad_items, via_items = pads.get(key, []), via_copper.get(key, [])
         ends = g['anchors'] | arc_ends.get(key, set())  # other same-net track and arc ends
         anchors = ends | {v.pos for v in via_items}
-        anchors |= _pad_anchors(segs, _copper_index(pad_items))
+        anchors |= _pad_anchors(segs, _copper_index(pad_items + via_items))
         attach = ends | _copper_points(segs, _copper_index(pad_items + via_items))
         plans.append(plan_fillets(segs, anchors, {key[0]: scaling[key[0]]}, min_radius_nm,
                                   fits, settings.avoid_junctions, on_accept,

@@ -862,5 +862,23 @@ class TestCases(unittest.TestCase):
         corner = [a for a in arcs(board) if abs(a.GetRadius() / MM - 1.0) < 0.002]
         self.assertEqual(len(corner), 1, self.radii(board))
 
+    def test_corner_inside_pad_or_via_with_stub_untouched(self):
+        # A short stub from a pad's (or via's) centre to a corner still inside
+        # it. Rounding would use up the stub and leave an arc lying wholly in
+        # the pad, ending on it alone, which kicad-cli 10.0.7 reports as a
+        # dangling track. The copper there is covered anyway: leave it alone.
+        b = fixtures.Board()
+        b.edge_rect(0, 0, 60, 40)
+        b.smd_pad(20, 10, 2.0, 2.0, 'SIG')
+        self.polyline(b, [(20, 10), (19.945, 10), (15, 5.055)], 'SIG')
+        b.tht_pad(15, 5.055, 1.5, 0.8, 'SIG')
+        b.via(40, 10, 'SIG')
+        self.polyline(b, [(40, 10), (40, 10.07), (45, 15.07)], 'SIG', layer=pcbnew.B_Cu)
+        b.tht_pad(45, 15.07, 1.5, 0.8, 'SIG')
+        sig = geometry(b.board, 'SIG')
+        board, stats = self.round_and_check(b, radius=2.0)
+        self.assertEqual(arcs(board), [])
+        self.assertEqual(geometry(board, 'SIG'), sig)
+
 if __name__ == '__main__':
     unittest.main()

@@ -26,11 +26,11 @@ The rounded sections are KiCad's native PCB arcs. These _can_ be adjusted after 
 
 ### Radius
 
-"Radius" is the true arc radius on a 90° bend. Shallower bends get a larger arc for the same setting, so they look as gentle as the 90° ones: a 45° bend gets about 2.7× the radius. A smaller arc is used when the tracks are too short or something is in the way. Corners on a pad, a via or an existing arc are skipped, so track ends there never move. Where other copper of the same net joins a track partway along (another track's end, an arc, a via or a pad), the arc stops at that point, so the joint stays on copper; if that leaves too little room, the corner stays sharp. A radius of 0 turns rounding off for that netclass, like unticking it.
+"Radius" is the true arc radius on a 90° bend. Shallower bends get a larger arc for the same setting, so they look as gentle as the 90° ones: a 45° bend gets about 2.7× the radius. A smaller arc is used when the tracks are too short or something is in the way. Corners on or inside a pad or via, or on an existing arc, are skipped, so track ends there never move (copper under a pad is covered anyway). Where other copper of the same net joins a track partway along (another track's end, an arc, a via or a pad), the arc stops at that point, so the joint stays on copper; if that leaves too little room, the corner stays sharp. A radius of 0 turns rounding off for that netclass, like unticking it.
 
 When two corners share a segment too short for both, the segment is split between them in proportion to what each one asked for. Two or more bends that turn the same way and are joined by short segments (two 45° bends close together, say) are replaced by one larger arc, if it fits; this is what you'd do by hand. Bends that turn opposite ways (an S-jog) are never merged, and neither are bends with same-net copper joining the short segment between them.
 
-Before rounding, collinear fragments and tiny slivers just before a corner are merged away, so a hidden scrap of track doesn't shrink the curve.
+Before rounding, collinear fragments and tiny slivers just before a corner are merged away, so a hidden scrap of track doesn't shrink the curve. Router-left micro-jogs (a kink no longer than half the track width, such as a 35 µm diagonal between two runs offset by 25 µm) are straightened out too, but only where the moved copper still clears everything around it. Joints that turn by less than about 1° are left as they are.
 
 "Min radius" is a floor. A corner that can only fit an arc below it is left sharp rather than given a tiny curve (so a netclass radius below Min radius leaves every corner in that class sharp, each with a warning). Every arc is tangent to the tracks on both sides; if that's not possible, the corner stays sharp.
 
@@ -40,7 +40,7 @@ Where three or more tracks meet, each pair of neighbouring tracks gets an arc, a
 
 ### Clearance
 
-Each new arc is checked against other nets' tracks, arcs, vias and pads (through-hole pads on every copper layer), drilled holes, the board edge, and keepout areas that forbid tracks, using the netclass and board clearances. If an arc doesn't clear, it is shrunk until it does; if it still doesn't clear at the min radius, the corner stays sharp. Custom rules in a `.kicad_dru` file and copper text are not modelled, and zone fills are ignored (refill them afterwards), so always run DRC after rounding.
+Each new arc is checked against other nets' tracks, arcs, vias and pads (through-hole pads on every copper layer), drilled holes, the board edge, and keepout areas that forbid tracks, using the netclass and board clearances. If an arc doesn't clear, a range of smaller arcs is tried and the largest that clears is used; if none does, the corner stays sharp. Like KiCad's DRC (which allows 0.5 µm), the check allows a little slack (0.25 µm), so tracks routed at exactly minimum spacing (a differential pair, say) can still be rounded. Custom rules in a `.kicad_dru` file and copper text are not modelled, and zone fills are ignored (refill them afterwards), so always run DRC after rounding.
 
 ### Warnings
 
