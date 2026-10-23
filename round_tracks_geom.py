@@ -159,7 +159,8 @@ class Sharp:
 
 
 STAT_KEYS = ('full', 'reduced', 'merged', 'sharp_length', 'sharp_clearance', 'skipped')
-SEARCH_STEPS = 8
+LADDER_STEPS = 8  # setbacks probed, geometrically spaced from min radius to allocated
+SEARCH_STEPS = 6  # bisections between the largest fitting probe and the next one up
 
 
 @dataclass
@@ -435,9 +436,23 @@ def _fits_all(bend, setback, fits):
 
 
 def _search_fit(bend, low, high, fits):
-    """Largest setback between low and high at which every arc fits, or None."""
-    if not _fits_all(bend, low, fits):
+    """Largest setback between low and high at which every arc fits, or None.
+
+    `high` is known to fail. Fitting needn't be monotonic in the setback (an
+    obstacle can block small arcs and miss larger ones), so a geometric ladder
+    from low to high is probed first, largest first; the search then bisects
+    between the largest probe that fits and the next probe up.
+    """
+    if low <= 0:  # no min radius: start the ladder well below high instead
+        low = high / 2 ** (LADDER_STEPS - 1)
+    ratio = (high / low) ** (1 / (LADDER_STEPS - 1))
+    ladder = [low * ratio ** k for k in range(LADDER_STEPS - 1)] + [high]
+    for k in range(LADDER_STEPS - 2, -1, -1):
+        if _fits_all(bend, ladder[k], fits):
+            break
+    else:
         return None
+    low, high = ladder[k], ladder[k + 1]
     for _ in range(SEARCH_STEPS):
         mid = (low + high) / 2
         if _fits_all(bend, mid, fits):

@@ -229,6 +229,27 @@ class TestPlanner(unittest.TestCase):
         self.assertFalse(p.updates)
         self.assertEqual(p.stats['sharp_clearance'], 1)
 
+    def test_floor_fails_but_mid_radius_fits(self):
+        # Non-monotonic: the min-radius probe fails, a mid-sized arc fits.
+        p = plan(ell(), fits=lambda a: 500_000 <= arc_radius_of(a) <= MM)
+        self.assertEqual(p.stats['reduced'], 1)
+        self.assertFalse(p.sharps)
+        self.assertEqual(len(p.arcs), 1)
+        r = arc_radius_of(p.arcs[0])
+        self.assertTrue(950_000 <= r <= MM, r)
+
+    def test_ladder_probes_are_deterministic_and_bounded(self):
+        asked = []
+        plan(ell(), fits=lambda a: asked.append(round(arc_radius_of(a))) or False)
+        self.assertEqual(plan(ell(), fits=lambda a: False).sharps, [Sharp((0, 0), 0, 'clearance')])
+        again = []
+        plan(ell(), fits=lambda a: again.append(round(arc_radius_of(a))) or False)
+        self.assertEqual(asked, again)
+        # The full arc, then the rest of the 8-value ladder; no bisection.
+        self.assertEqual(len(asked), 8)
+        self.assertAlmostEqual(min(asked), 100_000, delta=2)
+        self.assertAlmostEqual(max(asked), 2 * MM, delta=2)
+
     def test_fits_only_asked_about_arcs_above_min_radius(self):
         radii = []
         plan(ell(), min_radius=500_000, fits=lambda a: radii.append(arc_radius_of(a)) or False)
