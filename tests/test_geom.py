@@ -261,6 +261,39 @@ class TestJogCollapse(unittest.TestCase):
         self.assertEqual(new[0].b[0], 5 * MM + 30_500)
         self.assertEqual(set(updates), {0, 3})
 
+    def test_tilt_keeps_mid_run_attachment(self):
+        # A same-net via on the long run, 0.5 mm from its start: tilting the run
+        # onto the jog's far end would move its line ~22 um off the via.
+        via = (500_000, 0)
+        new, updates, removals = cleanup(jog_b(), {via}, seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
+    def test_tilt_keeps_branch_end_on_run(self):
+        # An in-scope branch ending on the run's interior counts the same.
+        segs = jog_b() + [seg(3, (2 * MM, 0), (2 * MM, 5 * MM))]
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
+    def test_tilt_allowed_when_attachment_barely_moves(self):
+        # Next to the pivot (the run's far end) the line moves well under 1 um.
+        near_pivot = (10_000, 0)
+        new, updates, removals = cleanup(jog_b(), {near_pivot}, seg_fits=fits_all)
+        self.assertEqual(removals, {1})
+
+    def test_plan_arc_stops_at_via_despite_jog(self):
+        # The reviewer's probe: corner at (0, 0), via on the run 0.5 mm away, an
+        # S-offset jog at the run's far end. The arc must still stop at the via.
+        w = 250_000
+        segs = [seg(0, (0, 10 * MM), (0, 0), w), seg(1, (0, 0), (10 * MM, 0), w),
+                seg(2, (10 * MM, 0), (10 * MM + 25_000, 25_000), w),
+                seg(3, (10 * MM + 25_000, 25_000), (13 * MM, 25_000), w)]
+        via = (500_000, 0)
+        p = plan_fillets(segs, {(0, 10 * MM), (13 * MM, 25_000), via}, {1: 2 * MM},
+                         100_000, lambda a: True, False, attach_points={via},
+                         seg_fits=fits_all)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertLessEqual(max(p.arcs[0].start[0], p.arcs[0].end[0]), 500_000)
+
     def test_plan_reports_moved_segments(self):
         accepted = []
         p = plan_fillets(jog_a(), set(), {1: 2 * MM}, 100_000, lambda a: True, False,

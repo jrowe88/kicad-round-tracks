@@ -194,12 +194,32 @@ def _jog_moves(s, neighbours):
     return None
 
 
+def _on_interior(pt, a, b):
+    """`pt` is within ATTACH_NM of segment a-b's line, strictly between its ends."""
+    length = math.dist(a, b)
+    if length == 0:
+        return False
+    dx, dy = (b[0] - a[0]) / length, (b[1] - a[1]) / length
+    rx, ry = pt[0] - a[0], pt[1] - a[1]
+    along = rx * dx + ry * dy
+    return 0 < along < length and abs(rx * dy - ry * dx) <= ATTACH_NM
+
+
+def _keeps_attachments(original, moved, points):
+    """Every point attached to `original`'s interior is still on `moved`'s."""
+    return all(_on_interior(pt, moved.a, moved.b) for pt in points
+               if _on_interior(pt, original.a, original.b))
+
+
 def _try_collapse_jog(segs, index, anchors, seg_fits):
     """Collapse one micro-jog if every moved segment passes `seg_fits`.
 
     A jog is a segment no longer than half its width, with neither end an
-    anchor or free, whose neighbours all share its width. Returns the ids of
-    the moved segments, or None.
+    anchor or free, whose neighbours all share its width. A collapse that
+    tilts a neighbour must not move its line off anything attached partway
+    along it (an anchor or attachment, or another segment's end), or that
+    copper would stop counting as attached and lose its connection. Returns
+    the ids of the moved segments, or None.
     """
     for s in sorted(segs.values(), key=lambda s: s.id):
         length = math.dist(s.a, s.b)
@@ -219,6 +239,10 @@ def _try_collapse_jog(segs, index, anchors, seg_fits):
             m = replace(n)
             _replace_end(m, old, new)
             moved.append(m)
+        points = set(anchors) | {e for o in segs.values() if o.layer == s.layer
+                                 and o.net == s.net for e in (o.a, o.b)}
+        if not all(_keeps_attachments(n, m, points) for (n, _, _), m in zip(moves, moved)):
+            continue
         if not all(seg_fits(m) for m in moved):
             continue
         for n, old, new in moves:
