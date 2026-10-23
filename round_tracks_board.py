@@ -416,7 +416,7 @@ def commit(board, plan, objects, select):
 
 
 WARNING_GROUP = 'round-tracks-warnings'
-_WARNING_TEXT = {'length': 'round-tracks: too short', 'clearance': 'round-tracks: clearance'}
+_WARNING_TEXT = {'length': 'too short', 'clearance': 'clearance'}
 _ARROW_LEN_MM = 1.5
 _ARROW_HEAD_MM = 0.4
 _ARROW_WIDTH_MM = 0.1

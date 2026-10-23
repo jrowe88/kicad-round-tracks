@@ -500,7 +500,7 @@ class TestCases(unittest.TestCase):
         texts = [i for i in items if i.GetClass() == 'PCB_TEXT']
         shapes = [i for i in items if i.GetClass() == 'PCB_SHAPE']
         self.assertEqual(len(texts), 1)
-        self.assertEqual(texts[0].GetText(), 'round-tracks: too short')
+        self.assertEqual(texts[0].GetText(), 'too short')
         self.assertGreaterEqual(len(shapes), 3)
         for i in items:
             self.assertEqual(i.GetLayer(), pcbnew.Cmts_User)
@@ -758,7 +758,7 @@ class TestCases(unittest.TestCase):
                          (1, 0, 0))
         texts = [i.GetText() for i in self.warning_groups(board)[0].GetItems()
                  if i.GetClass() == 'PCB_TEXT']
-        self.assertEqual(texts, ['round-tracks: clearance'])
+        self.assertEqual(texts, ['clearance'])
 
     def test_min_radius_floor_arrow(self):
         # Reverse 90 degree corners 0.6 mm apart: each can have at most 0.3 mm.
@@ -781,7 +781,7 @@ class TestCases(unittest.TestCase):
                 self.assertEqual(len(groups), 1)
                 items = list(groups[0].GetItems())
                 self.assertEqual([i.GetText() for i in items if i.GetClass() == 'PCB_TEXT'],
-                                 ['round-tracks: too short'] * 2)
+                                 ['too short'] * 2)
                 for x in (10, 10.6):
                     corner = pcbnew.VECTOR2I(round(x * MM), 10 * MM)
                     tips = [i for i in items if i.GetClass() == 'PCB_SHAPE'
