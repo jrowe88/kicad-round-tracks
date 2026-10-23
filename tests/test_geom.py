@@ -445,6 +445,33 @@ class TestPlanner(unittest.TestCase):
         self.assertLessEqual(arc_radius_of(p.arcs[0]), MAX_RADIUS_NM * 1.001)
         self.assertGreater(arc_radius_of(p.arcs[0]), MAX_RADIUS_NM * 0.99)
 
+    def test_kink_limit_is_stable_on_rerun(self):
+        # A 45 degree run ends at a slight kink; the corner's arc stops short of
+        # it. The piece left must stay above a sliver (point rounding included),
+        # so a second run, with the new arc's ends as anchors, changes nothing.
+        r = 1_000_000 / math.sqrt(2)
+        k = (round(r), round(r))
+        far = (k[0] + 7_071_068, k[1] + 7_071_068 + 70_711)
+        segs = [seg(0, (-10 * MM, 0), (0, 0)), seg(1, (0, 0), k), seg(2, k, far)]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 1)
+        ends = {i: p.updates.get(i, (s.a, s.b)) for i, s in enumerate(segs)}
+        again = plan([seg(i, a, b) for i, (a, b) in ends.items()],
+                     anchors={p.arcs[0].start, p.arcs[0].end})
+        self.assertFalse(again.updates or again.removals or again.arcs)
+
+    def test_radius_cap_applies_to_every_junction_arc(self):
+        # Gaps of 0.89 rad, pi - 0.03 rad and the rest: the shared setback is
+        # sized for the tightest pair, but the widest arc must stay under 1 m too.
+        a1, a2 = 0.89, 0.89 + math.pi - 0.03
+        legs = [(0, 0)] + [(round(100 * MM * math.cos(t)), round(100 * MM * math.sin(t)))
+                           for t in (0.0, a1, a2)]
+        segs = [seg(i, (0, 0), legs[i + 1]) for i in range(3)]
+        p = plan(segs, scaling=50 * MM)
+        self.assertEqual(len(p.arcs), 3)
+        for a in p.arcs:
+            self.assertLessEqual(arc_radius_of(a), MAX_RADIUS_NM * 1.001)
+
     def test_fits_only_asked_about_arcs_above_min_radius(self):
         radii = []
         plan(ell(), min_radius=500_000, fits=lambda a: radii.append(arc_radius_of(a)) or False)

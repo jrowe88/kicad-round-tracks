@@ -496,11 +496,13 @@ def _attachment_limits(segs, points):
 
 
 def _kink_limits(segs, anchors, limits):
-    """Keep every leg a sliver short of a near-straight kink at its far end.
+    """Keep every leg two slivers short of a near-straight kink at its far end.
 
     A joint turning by ANGLE_TOL..STRAIGHT_TOL gets no arc and reserves
     nothing, so a bend at the leg's other end could use the leg up and end its
-    arc right at the kink, off-tangent to the next segment.
+    arc right at the kink, off-tangent to the next segment. The margin is
+    two slivers so that, after rounding to nm, the piece left is never a
+    sliver that a later run would clean up (moving the kink onto the arc).
     """
     by_id = {s.id: s for s in segs}
     for (_, _, p), ids in _index(by_id).items():
@@ -513,7 +515,7 @@ def _kink_limits(segs, anchors, limits):
         if not math.pi - STRAIGHT_TOL <= interior_angle(p, f1, f2) < math.pi - ANGLE_TOL:
             continue
         for s, f in ((s1, f1), (s2, f2)):
-            cap = max(math.dist(s.a, s.b) - SLIVER_NM, 0)
+            cap = max(math.dist(s.a, s.b) - 2 * SLIVER_NM, 0)
             limits[(s.id, f)] = min(limits.get((s.id, f), math.inf), cap)
 
 
@@ -522,11 +524,19 @@ def _usable(s, p, requests, limits):
     return min(_share(s, p, requests), limits.get((s.id, p), math.inf))
 
 
+def _radius_cap(gaps):
+    """Largest setback that keeps every arc of these gaps within MAX_RADIUS_NM.
+
+    The widest gap has the largest radius at a shared setback, so it decides.
+    """
+    return setback_for_radius(MAX_RADIUS_NM, max(gaps))
+
+
 def _allocate(bends, requests, limits):
     """Set each bend's shared setback: its request, capped by every leg's usable
-    length and by MAX_RADIUS_NM."""
+    length and by MAX_RADIUS_NM for each of its arcs."""
     for b in bends:
-        b.setback = min([b.request, setback_for_radius(MAX_RADIUS_NM, b.interior)]
+        b.setback = min([b.request, _radius_cap([g for _, _, g in b._arc_pairs()])]
                         + [_usable(s, b.point, requests, limits) for s in b.legs])
 
 
@@ -620,8 +630,7 @@ def _merge(run, bends, requests, limits, scaling_nm, min_radius_nm):
     legs.sort(key=lambda s: s.id)
     interior = interior_angle(v, *(_far_end(s, v) for s in legs))
     virtual = _Bend(v, first.layer, first.net, tuple(legs), ((0, 1, interior),))
-    setback = min([setback_request(scaling_nm, interior),
-                   setback_for_radius(MAX_RADIUS_NM, interior)] + caps)
+    setback = min([setback_request(scaling_nm, interior), _radius_cap([interior])] + caps)
     radius = arc_radius(setback, interior)
     best = max(arc_radius(c.setback, c.interior) for c in corners)
     if setback < max(to_v) or radius < min_radius_nm or radius <= best:
