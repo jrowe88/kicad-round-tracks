@@ -7,6 +7,9 @@ from dataclasses import dataclass, field, replace
 
 Point = tuple  # (int, int)
 ANGLE_TOL = 0.001  # radians
+# A joint turning less than this is left as is: its arc would be enormous
+# (metres for a router kink) and differ from the corner by a few microns.
+STRAIGHT_TOL = 0.02  # radians
 SLIVER_NM = 1000  # segments shorter than this are cleanup candidates
 ATTACH_NM = 1000  # a point this close to a segment's line, between its ends, is on it
 _ATTACH_CELL = 1_000_000  # grid cell of the attachment point index, nm
@@ -98,8 +101,8 @@ def _try_merge(segs, index, anchors):
             continue
         _replace_end(s1, p, f2)
         del segs[s2.id]
-        return True
-    return False
+        return s1.id, s2.id
+    return None
 
 
 def _try_remove_sliver(segs, index, anchors):
@@ -125,20 +128,138 @@ def _try_remove_sliver(segs, index, anchors):
     return False
 
 
-def cleanup(segs, anchors):
-    """Merge collinear fragments and drop slivers.
+JOG_PARALLEL = math.pi / 8  # neighbours this close in direction count as parallel
+
+
+def _keeps_direction(s, old, new):
+    """Moving `s`'s end at `old` to `new` neither reverses it nor makes it a sliver."""
+    far = _far_end(s, old)
+    if math.dist(far, new) <= SLIVER_NM:
+        return False
+    return (old[0] - far[0]) * (new[0] - far[0]) + (old[1] - far[1]) * (new[1] - far[1]) > 0
+
+
+def _line_meet(f1, p, q, f2):
+    """Where line f1-p meets line q-f2, rounded to nm; None when parallel."""
+    d1 = (p[0] - f1[0], p[1] - f1[1])
+    d2 = (f2[0] - q[0], f2[1] - q[1])
+    det = d1[0] * d2[1] - d1[1] * d2[0]
+    if det == 0:
+        return None
+    t = ((q[0] - p[0]) * d2[1] - (q[1] - p[1]) * d2[0]) / det
+    return (round(p[0] + t * d1[0]), round(p[1] + t * d1[1]))
+
+
+def _jog_moves(s, neighbours):
+    """End moves, as (segment, old end, new end), that collapse jog `s`; or None.
+
+    `neighbours` maps each end of `s` to the other segments ending there.
+    A: both ends are plain two-segment points and the neighbours' lines meet
+    within twice the jog's length of both ends: both neighbours extend to that
+    point. B: the neighbours are (near-)parallel and head the same way, an
+    S-offset: the longer one tilts to reach the jog's far end. C: one end is a
+    junction, the other a plain point: the neighbour there reaches across to
+    the junction.
+    """
+    p, q = s.a, s.b
+    length = math.dist(p, q)
+    plain = [e for e in (p, q) if len(neighbours[e]) == 1]
+    for e in plain:
+        n = neighbours[e][0]
+        f = _far_end(n, e)
+        if f == e or interior_angle(e, f, _far_end(s, e)) >= math.pi - ANGLE_TOL:
+            return None  # degenerate, or collinear (merging handles that)
+    if len(plain) == 2:
+        n1, n2 = neighbours[p][0], neighbours[q][0]
+        if n1 is n2:
+            return None
+        f1, f2 = _far_end(n1, p), _far_end(n2, q)
+        v = _line_meet(f1, p, q, f2)
+        if (v is not None and math.dist(v, p) <= 2 * length and math.dist(v, q) <= 2 * length
+                and _keeps_direction(n1, p, v) and _keeps_direction(n2, q, v)):
+            return [(n1, p, v), (n2, q, v)]
+        if interior_angle((0, 0), (p[0] - f1[0], p[1] - f1[1]),
+                          (f2[0] - q[0], f2[1] - q[1])) > JOG_PARALLEL:
+            return None
+        l1, l2 = math.dist(f1, p), math.dist(q, f2)
+        n, old, new = (n1, p, q) if (l1, -n1.id) >= (l2, -n2.id) else (n2, q, p)
+        return [(n, old, new)] if _keeps_direction(n, old, new) else None
+    if len(plain) == 1:
+        e = plain[0]
+        j = q if e == p else p
+        n = neighbours[e][0]
+        if _far_end(n, e) == j:
+            return None
+        return [(n, e, j)] if _keeps_direction(n, e, j) else None
+    return None
+
+
+def _try_collapse_jog(segs, index, anchors, seg_fits):
+    """Collapse one micro-jog if every moved segment passes `seg_fits`.
+
+    A jog is a segment no longer than half its width, with neither end an
+    anchor or free, whose neighbours all share its width. Returns the ids of
+    the moved segments, or None.
+    """
+    for s in sorted(segs.values(), key=lambda s: s.id):
+        length = math.dist(s.a, s.b)
+        if length == 0 or length > s.width / 2 or s.a in anchors or s.b in anchors:
+            continue
+        neighbours = {e: [segs[i] for i in sorted(index[(s.layer, s.net, e)] - {s.id})]
+                      for e in (s.a, s.b)}
+        if any(not ns for ns in neighbours.values()):
+            continue
+        if any(n.width != s.width for ns in neighbours.values() for n in ns):
+            continue
+        moves = _jog_moves(s, neighbours)
+        if not moves:
+            continue
+        moved = []
+        for n, old, new in moves:
+            m = replace(n)
+            _replace_end(m, old, new)
+            moved.append(m)
+        if not all(seg_fits(m) for m in moved):
+            continue
+        for n, old, new in moves:
+            _replace_end(n, old, new)
+        del segs[s.id]
+        return [n.id for n, _, _ in moves]
+    return None
+
+
+def _cleanup(segs, anchors, seg_fits=None):
+    """cleanup(), plus the ids of surviving segments a jog collapse moved."""
+    original = {s.id: (s.a, s.b) for s in segs}
+    work = {s.id: Seg(s.id, s.a, s.b, s.width, s.layer, s.net) for s in segs}
+    jogged = set()
+    while True:
+        merged = _try_merge(work, _index(work), anchors)
+        if merged:
+            if merged[1] in jogged:
+                jogged.add(merged[0])
+            continue
+        if _try_remove_sliver(work, _index(work), anchors):
+            continue
+        moved = seg_fits and _try_collapse_jog(work, _index(work), anchors, seg_fits)
+        if not moved:
+            break
+        jogged.update(moved)
+    new_segs = [work[i] for i in sorted(work)]
+    updates = {s.id: (s.a, s.b) for s in new_segs if (s.a, s.b) != original[s.id]}
+    return new_segs, updates, set(original) - set(work), jogged & set(work)
+
+
+def cleanup(segs, anchors, seg_fits=None):
+    """Merge collinear fragments, drop slivers and, given `seg_fits`, collapse micro-jogs.
 
     Returns (new_segs, updates, removals): updates maps the id of a surviving
     original segment to its new (a, b); removals holds the ids that went away.
+    A jog collapse moves copper sideways (by at most the jog's length), so it
+    happens only when `seg_fits(seg) -> bool` accepts every moved segment;
+    without `seg_fits` no jog is collapsed.
     """
-    original = {s.id: (s.a, s.b) for s in segs}
-    work = {s.id: Seg(s.id, s.a, s.b, s.width, s.layer, s.net) for s in segs}
-    while (_try_merge(work, _index(work), anchors)
-           or _try_remove_sliver(work, _index(work), anchors)):
-        pass
-    new_segs = [work[i] for i in sorted(work)]
-    updates = {s.id: (s.a, s.b) for s in new_segs if (s.a, s.b) != original[s.id]}
-    return new_segs, updates, set(original) - set(work)
+    return _cleanup(segs, anchors, seg_fits)[:3]
 
 
 @dataclass
@@ -193,10 +314,11 @@ class _Bend:
         return _far_end(self.legs[i], self.point)
 
     def _arc_pairs(self):
-        return [(i, j, gap) for i, j, gap in self.pairs if gap < math.pi - ANGLE_TOL]
+        return [(i, j, gap) for i, j, gap in self.pairs if gap < math.pi - STRAIGHT_TOL]
 
     def _straight_pairs(self):
-        return [(i, j, gap) for i, j, gap in self.pairs if abs(gap - math.pi) <= ANGLE_TOL]
+        return [(i, j, gap) for i, j, gap in self.pairs
+                if abs(gap - math.pi) <= STRAIGHT_TOL]
 
     @property
     def interior(self):
@@ -231,7 +353,7 @@ def _find_bends(segs, anchors, scaling_by_net, avoid_junctions, stats):
             continue
         if len(legs) == 2:
             interior = interior_angle(p, *(_far_end(s, p) for s in legs))
-            if interior >= math.pi - ANGLE_TOL:
+            if interior >= math.pi - STRAIGHT_TOL:
                 continue
             pairs = ((0, 1, interior),)
         else:
@@ -269,7 +391,7 @@ def _end_requests(segs, anchors, scaling_by_net):
         for s in legs:
             angles = [interior_angle(p, _far_end(s, p), _far_end(o, p))
                       for o in legs if o is not s]
-            if angles and min(angles) < math.pi - ANGLE_TOL:
+            if angles and min(angles) < math.pi - STRAIGHT_TOL:
                 requests[(s.id, p)] = setback_request(scaling_by_net[net], min(angles))
     return requests
 
@@ -483,7 +605,7 @@ def _shorten(ends, bend, setback):
 
 
 def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junctions,
-                 on_accept=None, attach_points=None):
+                 on_accept=None, attach_points=None, seg_fits=None, on_accept_seg=None):
     """Plan cleanup, shortenings, fillet arcs and junction connectors.
 
     Plan.updates/removals describe the final state of every original segment id.
@@ -503,10 +625,15 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     one, and no setback or merged arc passes one lying on a segment: the copper
     left over still reaches it. Ends of the segments themselves that land on
     another segment's interior count too.
+
+    `seg_fits(seg) -> bool`, if given, enables micro-jog collapse in cleanup
+    (see cleanup); like `fits` it must be pure. `on_accept_seg(seg)`, if given,
+    is then called once for each surviving segment a jog collapse moved, with
+    its final ends, after the plan is made.
     """
     original = {s.id: (s.a, s.b) for s in segs}
     attach = set(attach_points or ())
-    cleaned, _, removals = cleanup(segs, set(anchors) | attach)
+    cleaned, _, removals, jogged = _cleanup(segs, set(anchors) | attach, seg_fits)
     plan = Plan({}, set(removals))
     bends = _find_bends(cleaned, anchors, scaling_by_net, avoid_junctions, plan.stats)
     requests = _end_requests(cleaned, anchors, scaling_by_net)
@@ -557,4 +684,8 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
             plan.removals.add(i)
         elif (a, b) != original[i]:
             plan.updates[i] = (a, b)
+    if on_accept_seg:
+        for s in cleaned:
+            if s.id in jogged and s.id not in plan.removals:
+                on_accept_seg(Seg(s.id, *ends[s.id], s.width, s.layer, s.net))
     return plan

@@ -11,7 +11,7 @@ from collections import Counter
 
 from round_tracks_board import (ClassSetting, ClearanceChecker, Settings, round_board,
                                 summary_text)
-from round_tracks_geom import SLIVER_NM, Arc
+from round_tracks_geom import SLIVER_NM, Arc, Seg
 from tests import drc, fixtures
 
 MM = 1_000_000
@@ -370,6 +370,26 @@ class TestCases(unittest.TestCase):
         self.assertTrue(checker.fits(Arc(arc.start, arc.mid, arc.end, arc.width,
                                          pcbnew.B_Cu, sig)))
 
+    def test_fits_segment_and_accept_segment(self):
+        b = fixtures.Board()
+        self.bend(b)
+        b.via(80, 80, 'OTHER')
+        _, board = self.load(b)
+        sig, other = board.FindNet('SIG').GetNetCode(), board.FindNet('OTHER').GetNetCode()
+        checker = ClearanceChecker(board)
+        seg = Seg(0, (40 * MM, 10 * MM), (42 * MM, 10 * MM), 250_000, pcbnew.F_Cu, sig)
+        near = Seg(1, (40 * MM, 10_450_000), (42 * MM, 10_450_000), 250_000, pcbnew.F_Cu, other)
+        closer = Seg(1, (40 * MM, 10_440_000), (42 * MM, 10_440_000), 250_000, pcbnew.F_Cu,
+                     other)
+        self.assertFalse(checker.fits_segment(Seg(0, (20 * MM, 10_400_000),
+                                                  (25 * MM, 10_400_000), 250_000,
+                                                  pcbnew.F_Cu, other)))   # SIG's leg
+        checker.accept_segment(seg)
+        self.assertTrue(checker.fits_segment(near))      # exactly at clearance
+        self.assertFalse(checker.fits_segment(closer))   # 10 um inside it
+        self.assertTrue(checker.fits_segment(Seg(1, closer.a, closer.b, closer.width,
+                                                 pcbnew.F_Cu, sig)))   # same net
+
     def test_t_junction_connector_committed(self):
         b = fixtures.Board()
         b.track(10, 10, 30, 10, 'SIG')
@@ -550,9 +570,9 @@ class TestCases(unittest.TestCase):
     # --- problem cases (spec "Intent" #1-#4) ---------------------------------
     # Each shape is drawn from an origin (x, y) so the mixed board can reuse it.
 
-    def polyline(self, b, pts, net):
+    def polyline(self, b, pts, net, layer=pcbnew.F_Cu):
         for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
-            b.track(x1, y1, x2, y2, net)
+            b.track(x1, y1, x2, y2, net, layer)
 
     def sliver_corner(self, b, x, y, net='SIG'):
         """90 degree corner at (x + 20, y) hiding a collinear 0.5 mm fragment and
@@ -825,6 +845,22 @@ class TestCases(unittest.TestCase):
                 self.assertEqual(len(r), 1)
                 self.assertAlmostEqual(r[0], 2.0, delta=0.002)
 
+
+    # --- micro-jogs ------------------------------------------------------------
+
+    def test_s_offset_jog_collapsed_before_corner(self):
+        # A router-left 35 um diagonal between two runs offset by 25 um, then a
+        # 90 degree corner. The jog collapses (the longer run tilts onto the
+        # second one), so the corner gets its full radius.
+        b = fixtures.Board()
+        b.edge_rect(0, 0, 50, 40)
+        self.polyline(b, [(10, 10), (20, 10), (20.025, 10.025), (30, 10.025), (30, 20)], 'SIG')
+        board, stats = self.round_and_check(b, radius=1.0)
+        lengths = [t.GetLength() for t in self.straight(board)]
+        self.assertFalse([x for x in lengths if x < 0.1 * MM], lengths)
+        self.assertEqual((stats['sharp_length'], stats['sharp_clearance']), (0, 0))
+        corner = [a for a in arcs(board) if abs(a.GetRadius() / MM - 1.0) < 0.002]
+        self.assertEqual(len(corner), 1, self.radii(board))
 
 if __name__ == '__main__':
     unittest.main()

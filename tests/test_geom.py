@@ -153,6 +153,128 @@ class TestCleanup(unittest.TestCase):
         self.assertFalse(updates)
         self.assertFalse(removals)
 
+def jog_a():
+    """A 42 um diagonal jog between a run east and a run south: their lines
+    meet 30 um past the jog's start."""
+    return [seg(0, (0, 0), (5 * MM, 0)),
+            seg(1, (5 * MM, 0), (5 * MM + 30_000, 30_000)),
+            seg(2, (5 * MM + 30_000, 30_000), (5 * MM + 30_000, 5 * MM))]
+
+
+def jog_b():
+    """A 35 um S-offset jog between two parallel runs east."""
+    return [seg(0, (0, 0), (5 * MM, 0)),
+            seg(1, (5 * MM, 0), (5 * MM + 25_000, 25_000)),
+            seg(2, (5 * MM + 25_000, 25_000), (8 * MM, 25_000))]
+
+
+def jog_c():
+    """A 14 um stub from a three-way junction at (5 mm, 0) to a run east."""
+    return [seg(0, (0, 0), (5 * MM, 0)),
+            seg(1, (5 * MM, 0), (5 * MM, -5 * MM)),
+            seg(2, (5 * MM, 0), (5 * MM + 10_000, 10_000)),
+            seg(3, (5 * MM + 10_000, 10_000), (10 * MM, 10_000))]
+
+
+def fits_all(s):
+    return True
+
+
+class TestJogCollapse(unittest.TestCase):
+    def test_disabled_without_seg_fits(self):
+        for segs in (jog_a(), jog_b(), jog_c()):
+            new, updates, removals = cleanup(segs, set())
+            self.assertEqual(len(new), len(segs))
+            self.assertFalse(updates or removals)
+
+    def test_case_a_neighbours_meet(self):
+        new, updates, removals = cleanup(jog_a(), set(), seg_fits=fits_all)
+        v = (5 * MM + 30_000, 0)
+        self.assertEqual(removals, {1})
+        self.assertEqual(updates, {0: ((0, 0), v), 2: (v, (5 * MM + 30_000, 5 * MM))})
+        self.assertEqual([s.id for s in new], [0, 2])
+
+    def test_case_b_longer_neighbour_tilts(self):
+        new, updates, removals = cleanup(jog_b(), set(), seg_fits=fits_all)
+        self.assertEqual(removals, {1})
+        self.assertEqual(updates, {0: ((0, 0), (5 * MM + 25_000, 25_000))})
+
+    def test_case_b_shorter_first_neighbour(self):
+        segs = [seg(0, (2 * MM, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM + 25_000, 25_000)),
+                seg(2, (5 * MM + 25_000, 25_000), (12 * MM, 25_000))]
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertEqual(removals, {1})
+        self.assertEqual(updates, {2: ((5 * MM, 0), (12 * MM, 25_000))})
+
+    def test_u_turn_is_not_a_jog(self):
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM, 50_000)),
+                seg(2, (5 * MM, 50_000), (0, 50_000))]
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
+    def test_case_c_junction_stub(self):
+        new, updates, removals = cleanup(jog_c(), set(), seg_fits=fits_all)
+        self.assertEqual(removals, {2})
+        self.assertEqual(updates, {3: ((5 * MM, 0), (10 * MM, 10_000))})
+
+    def test_long_segment_is_not_a_jog(self):
+        segs = jog_a()
+        segs[1] = seg(1, (5 * MM, 0), (5 * MM + 80_000, 80_000))   # 113 um > width / 2
+        segs[2] = seg(2, (5 * MM + 80_000, 80_000), (5 * MM + 80_000, 5 * MM))
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
+    def test_jog_at_anchor_untouched(self):
+        for anchor in ((5 * MM, 0), (5 * MM + 30_000, 30_000)):
+            new, updates, removals = cleanup(jog_a(), {anchor}, seg_fits=fits_all)
+            self.assertFalse(updates or removals)
+        new, updates, removals = cleanup(jog_c(), {(5 * MM, 0)}, seg_fits=fits_all)
+        self.assertFalse(updates or removals)
+
+    def test_seg_fits_failure_leaves_jog(self):
+        asked = []
+        for segs in (jog_a(), jog_b(), jog_c()):
+            new, updates, removals = cleanup(segs, set(),
+                                             seg_fits=lambda s: asked.append(s) or False)
+            self.assertFalse(updates or removals)
+        self.assertTrue(asked)
+
+    def test_seg_fits_sees_moved_segment(self):
+        asked = []
+        cleanup(jog_a(), set(), seg_fits=lambda s: asked.append((s.id, s.a, s.b)) or True)
+        v = (5 * MM + 30_000, 0)
+        self.assertEqual(sorted(asked), [(0, (0, 0), v), (2, v, (5 * MM + 30_000, 5 * MM))])
+
+    def test_iterates_with_sliver(self):
+        # A sub-micron sliver between the east run and the jog: it goes first,
+        # then the jog collapses onto the (slightly tilted) run.
+        segs = [seg(0, (0, 0), (5 * MM, 0)),
+                seg(1, (5 * MM, 0), (5 * MM + 500, 300)),
+                seg(2, (5 * MM + 500, 300), (5 * MM + 30_500, 30_300)),
+                seg(3, (5 * MM + 30_500, 30_300), (5 * MM + 30_500, 5 * MM))]
+        new, updates, removals = cleanup(segs, set(), seg_fits=fits_all)
+        self.assertEqual(removals, {1, 2})
+        self.assertEqual([s.id for s in new], [0, 3])
+        self.assertEqual(new[0].b, new[1].a)
+        self.assertEqual(new[0].b[0], 5 * MM + 30_500)
+        self.assertEqual(set(updates), {0, 3})
+
+    def test_plan_reports_moved_segments(self):
+        accepted = []
+        p = plan_fillets(jog_a(), set(), {1: 2 * MM}, 100_000, lambda a: True, False,
+                         seg_fits=fits_all, on_accept_seg=accepted.append)
+        self.assertEqual((p.stats['full'], len(p.arcs)), (1, 1))
+        self.assertEqual(p.removals, {1})
+        self.assertEqual(sorted((s.id, s.a, s.b) for s in accepted),
+                         sorted((i, a, b) for i, (a, b) in p.updates.items()))
+        self.assertEqual(len(accepted), 2)
+
+    def test_plan_without_seg_fits_keeps_jog(self):
+        p = plan_fillets(jog_b(), set(), {1: 2 * MM}, 100_000, lambda a: True, False)
+        self.assertEqual(p.stats['sharp_length'], 2)
+
 
 def arc_radius_of(arc):
     """Circumradius of the arc's three points."""
@@ -249,6 +371,14 @@ class TestPlanner(unittest.TestCase):
         self.assertEqual(len(asked), 8)
         self.assertAlmostEqual(min(asked), 100_000, delta=2)
         self.assertAlmostEqual(max(asked), 2 * MM, delta=2)
+
+    def test_near_straight_joint_left_alone(self):
+        # A 0.3 degree kink (as a tilted jog collapse leaves) would need an arc
+        # hundreds of metres in radius; it is treated as straight.
+        segs = [seg(0, (0, 0), (10 * MM, 0)), seg(1, (10 * MM, 0), (20 * MM, 50_000))]
+        p = plan(segs)
+        self.assertFalse(p.arcs or p.sharps or p.updates or p.removals)
+        self.assertEqual(sum(p.stats.values()), 0)
 
     def test_fits_only_asked_about_arcs_above_min_radius(self):
         radii = []

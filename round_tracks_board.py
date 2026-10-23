@@ -219,7 +219,10 @@ class ClearanceChecker:
     SMD on their own) and copper graphics, at the larger of the two items'
     clearances; drilled holes at the hole clearance; Edge.Cuts at the
     copper-to-edge clearance; rule areas forbidding tracks, at zero. Filled
-    zones are ignored. Arcs passed to `accept` become obstacles for later arcs.
+    zones are ignored. Every gap but a keepout's is DRC_EPSILON_NM short, as
+    in KiCad's DRC. Arcs passed to `accept` and segments passed to
+    `accept_segment` become obstacles for later checks. `fits_segment` checks
+    a straight Seg the same way.
     """
 
     def __init__(self, board, layer_items_cache=None):
@@ -242,12 +245,19 @@ class ClearanceChecker:
         item.SetLayer(arc.layer)
         return item
 
-    def _gap(self, arc):
-        if arc.net not in self.net_gap:
-            item = self._arc_item(arc)
-            item.SetNetCode(arc.net)
-            self.net_gap[arc.net] = item.GetOwnClearance(arc.layer)
-        return self.net_gap[arc.net]
+    def _track_item(self, seg):
+        item = pcbnew.PCB_TRACK(self.board)
+        item.SetStart(_vec(seg.a))
+        item.SetEnd(_vec(seg.b))
+        item.SetWidth(seg.width)
+        item.SetLayer(seg.layer)
+        return item
+
+    def _gap(self, item, net, layer):
+        if net not in self.net_gap:
+            item.SetNetCode(net)
+            self.net_gap[net] = item.GetOwnClearance(layer)
+        return self.net_gap[net]
 
     def _index(self, layer):
         if layer not in self.layers:
@@ -292,15 +302,13 @@ class ClearanceChecker:
                 index.add(_Obstacle(_ANY_NET, z.GetEffectiveShape(layer), 0, False))
         return index
 
-    def fits(self, arc):
-        """True when `arc` clears every obstacle; pure (no state change)."""
-        item = self._arc_item(arc)
-        shape = item.GetEffectiveShape(arc.layer)
-        own = self._gap(arc)
+    def _clear(self, item, net, layer):
+        shape = item.GetEffectiveShape(layer)
+        own = self._gap(item, net, layer)
         box = _bbox(shape)
-        index = self._index(arc.layer)
+        index = self._index(layer)
         for ob in index.near(box, max(own, index.max_gap)):
-            if ob.net == arc.net:
+            if ob.net == net:
                 continue
             # A keepout (gap 0) stays at 0: any overlap fails.
             gap = max((max(own, ob.gap) if ob.copper else ob.gap) - DRC_EPSILON_NM, 0)
@@ -311,24 +319,40 @@ class ClearanceChecker:
                 return False
         return True
 
+    def _add(self, item, net, layer):
+        self._index(layer).add(_Obstacle(net, item.GetEffectiveShape(layer),
+                                         self._gap(item, net, layer), True, item))
+
+    def fits(self, arc):
+        """True when `arc` clears every obstacle; pure (no state change)."""
+        return self._clear(self._arc_item(arc), arc.net, arc.layer)
+
     def accept(self, arc):
-        """Make a kept arc an obstacle for arcs checked after it."""
-        item = self._arc_item(arc)
-        self._index(arc.layer).add(_Obstacle(arc.net, item.GetEffectiveShape(arc.layer),
-                                             self._gap(arc), True, item))
+        """Make a kept arc an obstacle for checks after it."""
+        self._add(self._arc_item(arc), arc.net, arc.layer)
+
+    def fits_segment(self, seg):
+        """True when straight `seg` clears every obstacle; pure (no state change)."""
+        return self._clear(self._track_item(seg), seg.net, seg.layer)
+
+    def accept_segment(self, seg):
+        """Make a kept (moved) segment an obstacle for checks after it."""
+        self._add(self._track_item(seg), seg.net, seg.layer)
 
 
 def round_board(board, settings, fits=None, progress=None):
     """Fillet every in-scope corner of `board` and return the run's stats Counter.
 
     `fits` defaults to a ClearanceChecker over the board (whose accepted arcs
-    then block later ones); a custom `fits` is used as is. `progress(message)`,
-    if given, is called before each net is planned.
+    then block later ones), which also checks and records micro-jog collapses;
+    a custom `fits` is used as is, and jogs are then left alone.
+    `progress(message)`, if given, is called before each net is planned.
     """
-    on_accept = None
+    on_accept = seg_fits = on_accept_seg = None
     if fits is None:
         checker = ClearanceChecker(board)
         fits, on_accept = checker.fits, checker.accept
+        seg_fits, on_accept_seg = checker.fits_segment, checker.accept_segment
     scaling = _scaling_by_net(board, settings)
     groups = {}   # (net, layer) -> {'segs': in-scope Segs, 'anchors': out-of-scope track ends}
     objects = {}  # Seg id -> PCB_TRACK
@@ -380,7 +404,8 @@ def round_board(board, settings, fits=None, progress=None):
         attach = ends | _copper_points(segs, _copper_index(pad_items + via_items))
         plans.append(plan_fillets(segs, anchors, {key[0]: scaling[key[0]]}, min_radius_nm,
                                   fits, settings.avoid_junctions, on_accept,
-                                  attach_points=attach))
+                                  attach_points=attach, seg_fits=seg_fits,
+                                  on_accept_seg=on_accept_seg))
     # Compute everything first, then touch the board.
     sharps = []
     for plan in plans:
