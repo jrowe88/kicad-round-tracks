@@ -356,6 +356,7 @@ class ActionRoundTracks( pcbnew.ActionPlugin ):
         self.description = "Native arc-based track rounding"
         self.show_toolbar_button = True
         self.icon_file_name = os.path.join(os.path.dirname(__file__), "./round_tracks.png")
+        self.dark_icon_file_name = os.path.join(os.path.dirname(__file__), "./round_tracks_dark.png")
 
     def Run( self ):
         if pcbnew.GetBuildVersion()=='(7.0.0)':
