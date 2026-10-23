@@ -10,6 +10,9 @@ ANGLE_TOL = 0.001  # radians
 # A joint turning less than this is left as is: its arc would be enormous
 # (metres for a router kink) and differ from the corner by a few microns.
 STRAIGHT_TOL = 0.02  # radians
+# Largest arc radius ever planned: KiCad's coordinates are int32 nm (+-2.1 m),
+# and an arc's centre must stay representable.
+MAX_RADIUS_NM = 1_000_000_000
 SLIVER_NM = 1000  # segments shorter than this are cleanup candidates
 ATTACH_NM = 1000  # a point this close to a segment's line, between its ends, is on it
 _ATTACH_CELL = 1_000_000  # grid cell of the attachment point index, nm
@@ -471,15 +474,39 @@ def _attachment_limits(segs, points):
     return limits
 
 
+def _kink_limits(segs, anchors, limits):
+    """Keep every leg a sliver short of a near-straight kink at its far end.
+
+    A joint turning by ANGLE_TOL..STRAIGHT_TOL gets no arc and reserves
+    nothing, so a bend at the leg's other end could use the leg up and end its
+    arc right at the kink, off-tangent to the next segment.
+    """
+    by_id = {s.id: s for s in segs}
+    for (_, _, p), ids in _index(by_id).items():
+        if len(ids) != 2 or p in anchors:
+            continue
+        s1, s2 = (by_id[i] for i in sorted(ids))
+        f1, f2 = _far_end(s1, p), _far_end(s2, p)
+        if f1 == p or f2 == p:
+            continue
+        if not math.pi - STRAIGHT_TOL <= interior_angle(p, f1, f2) < math.pi - ANGLE_TOL:
+            continue
+        for s, f in ((s1, f1), (s2, f2)):
+            cap = max(math.dist(s.a, s.b) - SLIVER_NM, 0)
+            limits[(s.id, f)] = min(limits.get((s.id, f), math.inf), cap)
+
+
 def _usable(s, p, requests, limits):
     """Length of `s` its end at `p` may use: its share, stopping at any attachment."""
     return min(_share(s, p, requests), limits.get((s.id, p), math.inf))
 
 
 def _allocate(bends, requests, limits):
-    """Set each bend's shared setback: its request, capped by every leg's usable length."""
+    """Set each bend's shared setback: its request, capped by every leg's usable
+    length and by MAX_RADIUS_NM."""
     for b in bends:
-        b.setback = min([b.request] + [_usable(s, b.point, requests, limits) for s in b.legs])
+        b.setback = min([b.request, setback_for_radius(MAX_RADIUS_NM, b.interior)]
+                        + [_usable(s, b.point, requests, limits) for s in b.legs])
 
 
 def _turn(prev, p, nxt):
@@ -572,7 +599,8 @@ def _merge(run, bends, requests, limits, scaling_nm, min_radius_nm):
     legs.sort(key=lambda s: s.id)
     interior = interior_angle(v, *(_far_end(s, v) for s in legs))
     virtual = _Bend(v, first.layer, first.net, tuple(legs), ((0, 1, interior),))
-    setback = min([setback_request(scaling_nm, interior)] + caps)
+    setback = min([setback_request(scaling_nm, interior),
+                   setback_for_radius(MAX_RADIUS_NM, interior)] + caps)
     radius = arc_radius(setback, interior)
     best = max(arc_radius(c.setback, c.interior) for c in corners)
     if setback < max(to_v) or radius < min_radius_nm or radius <= best:
@@ -678,6 +706,7 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     bends = _find_bends(cleaned, anchors, scaling_by_net, avoid_junctions, plan.stats)
     requests = _end_requests(cleaned, anchors, scaling_by_net)
     limits = _attachment_limits(cleaned, attach | {e for s in cleaned for e in (s.a, s.b)})
+    _kink_limits(cleaned, anchors, limits)
     _allocate(bends, requests, limits)
     runs = {min(run): run for run in _find_runs(bends, requests, limits, attach)}
     ends = {s.id: (s.a, s.b) for s in cleaned}

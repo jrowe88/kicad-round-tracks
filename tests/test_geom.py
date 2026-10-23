@@ -5,7 +5,7 @@ from math import pi
 
 from round_tracks_geom import (setback_request, arc_radius, setback_for_radius,
                                fillet_points, interior_angle, Seg, cleanup,
-                               Sharp, plan_fillets, SLIVER_NM)
+                               Sharp, plan_fillets, SLIVER_NM, MAX_RADIUS_NM)
 
 
 class TestPrimitives(unittest.TestCase):
@@ -412,6 +412,28 @@ class TestPlanner(unittest.TestCase):
         p = plan(segs)
         self.assertFalse(p.arcs or p.sharps or p.updates or p.removals)
         self.assertEqual(sum(p.stats.values()), 0)
+
+    def test_arc_stops_before_near_straight_kink(self):
+        # A 0.01 rad kink 1 mm from a 90 degree corner: the corner may not use
+        # the whole 1 mm run, or its arc would meet the kinked run off-tangent.
+        segs = [seg(0, (0, 10 * MM), (0, 0)), seg(1, (0, 0), (MM, 0)),
+                seg(2, (MM, 0), (11 * MM, 100_000))]
+        p = plan(segs)
+        self.assertEqual(len(p.arcs), 1)
+        self.assertNotIn(1, p.removals)
+        a, b = p.updates[1]
+        self.assertEqual(b, (MM, 0))
+        self.assertGreater(math.dist(a, b), 0)
+        self.assertNotIn((MM, 0), (p.arcs[0].start, p.arcs[0].end))
+
+    def test_radius_capped_at_one_metre(self):
+        # A huge netclass radius on long legs is clamped, never an arc whose
+        # centre lies metres away (beyond KiCad's int32 nm coordinates).
+        legs = 2_000_000_000
+        p = plan(ell(leg=legs), scaling=1_500_000_000)
+        self.assertEqual(p.stats['reduced'], 1)
+        self.assertLessEqual(arc_radius_of(p.arcs[0]), MAX_RADIUS_NM * 1.001)
+        self.assertGreater(arc_radius_of(p.arcs[0]), MAX_RADIUS_NM * 0.99)
 
     def test_fits_only_asked_about_arcs_above_min_radius(self):
         radii = []
