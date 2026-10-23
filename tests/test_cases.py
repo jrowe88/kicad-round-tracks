@@ -452,7 +452,7 @@ class TestCases(unittest.TestCase):
         b.edge_rect(0, 0, 60, 50)
         self.close_45s(b, 10, 10)             # 0.3 mm diagonal from (20, 10)
         d = 0.15 / math.sqrt(2)
-        b.via(20 + d, 10 + d, 'SIG', size=0.4, drill=0.2)
+        b.via(20 + d, 10 + d, 'SIG', size=0.25, drill=0.15)   # corners stay outside it
         b.track(20 + d, 10 + d, 20 + d, 30, 'SIG', layer=pcbnew.B_Cu)
         b.tht_pad(20 + d, 30, 1.5, 0.8, 'SIG')
         b.tht_pad(10, 10, 1.5, 0.8, 'SIG')
@@ -608,9 +608,10 @@ class TestCases(unittest.TestCase):
                       net)
 
     def zigzag(self, b, x, y, net='SIG'):
-        """Reverse 90 degree bends 0.05 mm apart (too close for any arc), then a
-        plain 90 degree corner at (x + 20, y + 0.05)."""
-        self.polyline(b, [(x, y), (x + 10, y), (x + 10, y + 0.05), (x + 20, y + 0.05),
+        """Reverse 90 degree bends 0.15 mm apart (too close for an arc above the
+        0.1 mm min radius, too long for a micro-jog), then a plain 90 degree
+        corner at (x + 20, y + 0.15)."""
+        self.polyline(b, [(x, y), (x + 10, y), (x + 10, y + 0.15), (x + 20, y + 0.15),
                           (x + 20, y + 10)], net)
 
     def radii(self, board, net='SIG'):
@@ -710,7 +711,7 @@ class TestCases(unittest.TestCase):
                          [1, 8, 3, 2, 1, 1, 1])
         self.assertAlmostEqual(self.radii(board, 'F')[0], 2.0, delta=0.002)
         self.assertLess(self.radii(board, 'G')[0], 1.23)
-        zig = (pcbnew.VECTOR2I(60 * MM, 50 * MM), pcbnew.VECTOR2I(60 * MM, 50_050_000))
+        zig = (pcbnew.VECTOR2I(60 * MM, 50 * MM), pcbnew.VECTOR2I(60 * MM, 50_150_000))
         f_ends = [p for t in self.straight(board, 'F') for p in (t.GetStart(), t.GetEnd())]
         for p in zig:
             self.assertEqual(f_ends.count(p), 2)           # sharp corners untouched

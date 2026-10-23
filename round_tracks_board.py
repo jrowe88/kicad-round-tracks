@@ -116,14 +116,16 @@ class _LayerIndex:
 
 
 class _Copper:
-    """A same-net pad or via as plain numbers: its bounding box and position."""
-    __slots__ = ('box', 'pos', 'gap')
+    """A same-net pad or via as plain numbers: its bounding box and position
+    (and the item, for an exact hit test)."""
+    __slots__ = ('box', 'pos', 'gap', 'item')
 
     def __init__(self, item):
         box = item.GetBoundingBox()
         self.box = (box.GetLeft(), box.GetTop(), box.GetRight(), box.GetBottom())
         self.pos = _pt(item.GetPosition())
         self.gap = 0
+        self.item = item
 
 
 def _contains(box, p):
@@ -151,7 +153,7 @@ def _copper_index(items):
 
 
 def _pad_anchors(segs, pads):
-    """Shared track ends inside a same-net pad or via (legacy withinPad).
+    """Shared track ends on a same-net pad's or via's copper (legacy withinPad).
 
     `pads` is a _LayerIndex of the net's _Copper pads and vias on the segments'
     layer. Rounding there gains nothing (the copper is covered), and where a
@@ -167,7 +169,7 @@ def _pad_anchors(segs, pads):
         if len(far_ends) < 2:
             continue
         for pad in pads.near(point + point, 0):
-            if _contains(pad.box, point):
+            if _contains(pad.box, point) and pad.item.HitTest(_vec(point)):
                 anchors.add(point)
                 break
     return anchors
