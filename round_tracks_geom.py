@@ -355,10 +355,14 @@ class _Bend:
                 for i, j, _ in self._arc_pairs()]
 
     def tracks(self, setback):
-        return [Seg(-1, point_along(self.point, self._far(i), setback),
-                    point_along(self.point, self._far(j), setback),
-                    self.legs[0].width, self.layer, self.net)
-                for i, j, _ in self._straight_pairs()]
+        return [bar for bar, _ in self.bars(setback)]
+
+    def bars(self, setback):
+        """(connector Seg, gap) for each straight pair."""
+        return [(Seg(-1, point_along(self.point, self._far(i), setback),
+                     point_along(self.point, self._far(j), setback),
+                     self.legs[0].width, self.layer, self.net), gap)
+                for i, j, gap in self._straight_pairs()]
 
 
 def _direction(p, q):
@@ -576,12 +580,22 @@ def _merge(run, bends, requests, limits, scaling_nm, min_radius_nm):
     return virtual, setback, inner, ((outer[0].id, p0), (outer[1].id, pn))
 
 
-def _fits_all(bend, setback, fits):
-    """Ask `fits` about each arc in leg order, stopping at the first that fails."""
-    return all(fits(arc) for arc in bend.arcs(setback))
+def _bar_fits(bar, gap, seg_fits):
+    """A connector on exactly straight legs lies on their copper; one across a
+    slight kink cuts the corner, so it needs `seg_fits` (none: it can't go)."""
+    if abs(gap - math.pi) <= ANGLE_TOL:
+        return True
+    return seg_fits is not None and seg_fits(bar)
 
 
-def _search_fit(bend, low, high, fits):
+def _fits_all(bend, setback, fits, seg_fits=None):
+    """Ask `fits` about each arc in leg order, then about each connector,
+    stopping at the first that fails."""
+    return (all(fits(arc) for arc in bend.arcs(setback))
+            and all(_bar_fits(bar, gap, seg_fits) for bar, gap in bend.bars(setback)))
+
+
+def _search_fit(bend, low, high, fits, seg_fits=None):
     """Largest setback between low and high at which every arc fits, or None.
 
     `high` is known to fail. Fitting needn't be monotonic in the setback (an
@@ -594,29 +608,29 @@ def _search_fit(bend, low, high, fits):
     ratio = (high / low) ** (1 / (LADDER_STEPS - 1))
     ladder = [low * ratio ** k for k in range(LADDER_STEPS - 1)] + [high]
     for k in range(LADDER_STEPS - 2, -1, -1):
-        if _fits_all(bend, ladder[k], fits):
+        if _fits_all(bend, ladder[k], fits, seg_fits):
             break
     else:
         return None
     low, high = ladder[k], ladder[k + 1]
     for _ in range(SEARCH_STEPS):
         mid = (low + high) / 2
-        if _fits_all(bend, mid, fits):
+        if _fits_all(bend, mid, fits, seg_fits):
             low = mid
         else:
             high = mid
     return low
 
 
-def _size_bend(bend, min_radius_nm, fits):
+def _size_bend(bend, min_radius_nm, fits, seg_fits=None):
     """Return (setback or None, stats key) for one bend, all-or-nothing."""
     radius = arc_radius(bend.setback, bend.interior)
     if radius <= 0 or radius < min_radius_nm:
         return None, 'sharp_length'
-    if _fits_all(bend, bend.setback, fits):
+    if _fits_all(bend, bend.setback, fits, seg_fits):
         return bend.setback, 'full' if bend.setback >= bend.request else 'reduced'
     low = setback_for_radius(min_radius_nm, bend.interior)
-    setback = _search_fit(bend, low, bend.setback, fits)
+    setback = _search_fit(bend, low, bend.setback, fits, seg_fits)
     return (setback, 'reduced') if setback is not None else (None, 'sharp_clearance')
 
 
@@ -642,7 +656,7 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     `fits(arc) -> bool` must be a pure predicate: it is also asked about probe
     arcs that are never kept. `on_accept(arc)`, if given, is called exactly once
     per arc the plan keeps, in Plan.arcs order, as soon as its bend is decided
-    (so later `fits` calls can account for it). Plan.tracks are not reported.
+    (so later `fits` calls can account for it).
 
     `attach_points` are where other same-net copper (track and arc ends, vias,
     pads) meets these segments. Cleanup never merges or drops a sliver through
@@ -651,9 +665,11 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
     another segment's interior count too.
 
     `seg_fits(seg) -> bool`, if given, enables micro-jog collapse in cleanup
-    (see cleanup); like `fits` it must be pure. `on_accept_seg(seg)`, if given,
-    is then called once for each surviving segment a jog collapse moved, with
-    its final ends, after the plan is made.
+    (see cleanup) and is asked about junction connectors that cut across a
+    slight kink (without it such a junction stays sharp); like `fits` it must
+    be pure. `on_accept_seg(seg)`, if given, is called for each kept junction
+    connector as its bend is decided, and once for each surviving segment a
+    jog collapse moved, with its final ends, after the plan is made.
     """
     original = {s.id: (s.a, s.b) for s in segs}
     attach = set(attach_points or ())
@@ -689,7 +705,7 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
                 _shorten(ends, virtual, setback)
                 shortened.update(i for i, _ in joins)
                 continue
-        setback, key = _size_bend(b, min_radius_nm, fits)
+        setback, key = _size_bend(b, min_radius_nm, fits, seg_fits)
         plan.stats[key] += 1
         if setback is None:
             plan.sharps.append(Sharp(b.point, b.layer, key[len('sharp_'):]))
@@ -698,7 +714,10 @@ def plan_fillets(segs, anchors, scaling_by_net, min_radius_nm, fits, avoid_junct
             plan.arcs.append(arc)
             if on_accept:
                 on_accept(arc)
-        plan.tracks.extend(b.tracks(setback))
+        for bar in b.tracks(setback):
+            plan.tracks.append(bar)
+            if on_accept_seg:
+                on_accept_seg(bar)
         _shorten(ends, b, setback)
         shortened.update(s.id for s in b.legs)
     for i, (a, b) in ends.items():

@@ -671,6 +671,40 @@ class TestJunctions(unittest.TestCase):
         self.assertEqual(Counter(pt for a in p.arcs for pt in (a.start, a.end))[(0, 1_500_000)], 2)
         self.assertEqual(len(p.tracks), 1)
 
+    def near_straight_tee(self):
+        """A tee whose east arm is tilted 0.015 rad, as a jog collapse leaves it."""
+        d = 0.015
+        return [seg(0, (-10 * MM, 0), (0, 0)),
+                seg(1, (0, 0), (round(10 * MM * math.cos(d)), -round(10 * MM * math.sin(d)))),
+                seg(2, (0, 0), (0, 10 * MM))]
+
+    def test_near_straight_bar_unchecked_is_sharp(self):
+        # The bar is a chord across the kink, moving copper sideways: without a
+        # segment check it may not be placed.
+        p = plan(self.near_straight_tee())
+        self.assertEqual(p.stats['sharp_clearance'], 1)
+        self.assertFalse(p.arcs or p.tracks or p.updates)
+
+    def test_near_straight_bar_checked_and_reported(self):
+        asked, kept = [], []
+        p = plan_fillets(self.near_straight_tee(), set(), {1: 2 * MM}, 100_000,
+                         lambda a: True, False, seg_fits=lambda s: asked.append(s) or True,
+                         on_accept_seg=kept.append)
+        self.assertEqual(len(p.tracks), 1)
+        self.assertIn(p.tracks[0], asked)
+        self.assertIn(p.tracks[0], kept)
+
+    def test_near_straight_bar_failing_seg_fits_is_sharp(self):
+        p = plan_fillets(self.near_straight_tee(), set(), {1: 2 * MM}, 100_000,
+                         lambda a: True, False, seg_fits=lambda s: s.id != -1)
+        self.assertEqual(p.stats['sharp_clearance'], 1)
+        self.assertFalse(p.arcs or p.tracks)
+
+    def test_straight_bar_without_seg_fits_still_rounds(self):
+        p = plan(tee())
+        self.assertEqual(len(p.tracks), 1)
+        self.assertEqual(p.stats['full'], 1)
+
     def test_corner_plan_has_no_tracks(self):
         self.assertEqual(plan(ell()).tracks, [])
 
