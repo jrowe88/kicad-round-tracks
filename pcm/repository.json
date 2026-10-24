@@ -1,0 +1,22 @@
+{
+    "$schema": "https://go.kicad.org/pcm/schemas/v1#/definitions/Repository",
+    "name": "Round Tracks (Adaptive) by jrowe88",
+    "maintainer": {
+        "name": "Jim Rowe",
+        "contact": {
+            "github": "https://github.com/jrowe88"
+        }
+    },
+    "packages": {
+        "url": "https://raw.githubusercontent.com/jrowe88/kicad-round-tracks/master/pcm/packages.json",
+        "sha256": "b1d603559c59f6a3870bdc92ddb9c3e25c2806a157ee6fb47f143fbd161f5c76",
+        "update_timestamp": 1792800954,
+        "update_time_utc": "2026-10-24 00:15:54"
+    },
+    "resources": {
+        "url": "https://raw.githubusercontent.com/jrowe88/kicad-round-tracks/master/pcm/resources.zip",
+        "sha256": "d48553862c456255df4502877fa1ea662a79ac63267a7f17a9408c2445cdf9f1",
+        "update_timestamp": 1792800954,
+        "update_time_utc": "2026-10-24 00:15:54"
+    }
+}

@@ -1,0 +1,50 @@
+{
+    "packages": [
+        {
+            "name": "Round Tracks (Adaptive)",
+            "description": "Clearance-aware track rounding with native arcs.",
+            "description_full": "Rounds track corners per net class with native arcs. Arcs shrink to keep clearance to vias, pads, holes, the board edge and keepouts; close bends merge into one arc; router fragments are cleaned up first. Corners that can't be rounded are marked on the User.Comments layer. Fork of mitxela's Round Tracks.",
+            "identifier": "com.github.jrowe88.kicad-round-tracks",
+            "type": "plugin",
+            "author": {
+                "name": "mitxela",
+                "contact": {
+                    "web": "https://mitxela.com"
+                }
+            },
+            "maintainer": {
+                "name": "Jim Rowe",
+                "contact": {
+                    "github": "https://github.com/jrowe88"
+                }
+            },
+            "license": "Apache-2.0",
+            "resources": {
+                "homepage": "https://github.com/jrowe88/kicad-round-tracks"
+            },
+            "tags": [
+                "tracks",
+                "routing",
+                "fillet",
+                "arcs"
+            ],
+            "versions": [
+                {
+                    "version": "2.0.0",
+                    "status": "testing",
+                    "kicad_version": "10.0",
+                    "runtime": "swig",
+                    "platforms": [
+                        "linux",
+                        "macos",
+                        "windows"
+                    ],
+                    "download_url": "https://github.com/jrowe88/kicad-round-tracks/releases/download/v2.0.0/kicad-round-tracks-2.0.0.zip",
+                    "download_sha256": "64d5c3e0264954edc5334072935d6bdd3c043bf0ad288fb32f0ca44ca77a8f09",
+                    "download_size": 29300,
+                    "install_size": 84015
+                }
+            ]
+        }
+    ]
+}

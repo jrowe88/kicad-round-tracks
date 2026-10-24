@@ -1,9 +1,9 @@
 {
     "$schema": "https://go.kicad.org/pcm/schemas/v1",
-    "name": "Round Tracks",
-    "description": "A native arc-based track rounding plugin.",
-    "description_full": "Algorithmically smooth tracks in a predictable manner. Useful for flex PCBs, or just because it looks cool.",
-    "identifier": "com.github.mitxela.kicad-round-tracks",
+    "name": "Round Tracks (Adaptive)",
+    "description": "Clearance-aware track rounding with native arcs.",
+    "description_full": "Rounds track corners per net class with native arcs. Arcs shrink to keep clearance to vias, pads, holes, the board edge and keepouts; close bends merge into one arc; router fragments are cleaned up first. Corners that can't be rounded are marked on the User.Comments layer. Fork of mitxela's Round Tracks.",
+    "identifier": "com.github.jrowe88.kicad-round-tracks",
     "type": "plugin",
     "author": {
         "name": "mitxela",
@@ -11,25 +11,33 @@
             "web": "https://mitxela.com"
         }
     },
+    "maintainer": {
+        "name": "Jim Rowe",
+        "contact": {
+            "github": "https://github.com/jrowe88"
+        }
+    },
     "license": "Apache-2.0",
     "resources": {
-        "homepage": "https://github.com/mitxela/kicad-round-tracks"
+        "homepage": "https://github.com/jrowe88/kicad-round-tracks"
     },
+    "tags": [
+        "tracks",
+        "routing",
+        "fillet",
+        "arcs"
+    ],
     "versions": [
         {
             "version": "VERSION",
-            "status": "stable",
-            "kicad_version": "7.0.1",
-            "download_sha256": "SHA256",
-            "download_size": DOWNLOAD_SIZE,
-            "download_url": "https://github.com/mitxela/kicad-round-tracks/releases/download/VERSION/kicad-round-tracks-VERSION.zip",
-            "install_size": INSTALL_SIZE,
+            "status": "testing",
+            "kicad_version": "10.0",
+            "runtime": "swig",
             "platforms": [
                 "linux",
                 "macos",
                 "windows"
             ]
-
         }
     ]
 }

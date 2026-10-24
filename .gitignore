@@ -106,3 +106,4 @@ venv.bak/
 
 kicad-round-tracks-*.zip
 metadata.json
+dist/

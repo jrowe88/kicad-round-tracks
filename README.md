@@ -51,7 +51,18 @@ Every corner left sharp because it was too short or blocked gets an arrow and a 
 "Unround" turns arcs back into corners where their tangents meet. It is approximate: a merged arc comes back as a single corner, and cleaned-up fragments don't come back at all. Arcs that turn nearly 180° (hairpins) are left in place, and the plugin tells you how many. Ctrl+Z straight after a run is the exact undo.
 
 ## Installation
-Now available from the Plugin and Content manager.
+This fork is installed from its own package repository in KiCad's Plugin and Content Manager (KiCad 10 or later):
+
+1. Open the Plugin and Content Manager and choose **Manage...** next to the repository list.
+2. Add this repository URL:
+   ```
+   https://raw.githubusercontent.com/jrowe88/kicad-round-tracks/master/pcm/repository.json
+   ```
+3. Select the new repository, find **Round Tracks (Adaptive)** and install it.
+
+If mitxela's original Round Tracks is installed, uninstall it first: both register a "Round tracks" action.
+
+To build a release, run `python tools/build_pcm.py <version>`. It writes the package zip to `dist/` (attach it to the GitHub release tagged `v<version>`) and refreshes the files in `pcm/` (commit them to master).
 
 For manual install, clone or unzip this repository in a KiCad plugin folder. You can list the exact paths where KiCad will search for plugins by opening the scripting console in pcbnew and running:
 ```
