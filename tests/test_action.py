@@ -33,6 +33,9 @@ class FakeDialog:
         self.validate_all_data = mock.Mock()
         self.save_config = mock.Mock()
         self.EndModal = mock.Mock()
+        self.selected_only = mock.Mock()
+        self.selected_only.IsChecked.return_value = False
+        self.selected_count = 0
         self.prog = None
 
     def __getattr__(self, name):
@@ -81,6 +84,30 @@ class TestRunHandler(unittest.TestCase):
         self.assertEqual(dialog.apply.SetLabel.call_args_list[-1], mock.call('Run'))
         self.assertIn('Rounded 3 corners', wx.MessageBox.call_args[0][0])
         dialog.EndModal.assert_called_once()
+
+    def test_refill_zones_only_when_ticked(self):
+        for ticked in (False, True):
+            dialog = FakeDialog(self.board())
+            dialog.settings.refill_zones = ticked
+            with mock.patch.object(round_tracks_action, 'round_board', return_value=Counter(full=1)),                     mock.patch.object(round_tracks_action.pcbnew, 'ZONE_FILLER') as filler:
+                RoundTracks.run(dialog, None)
+            self.assertEqual(filler.call_count, 1 if ticked else 0)
+
+    def test_refill_failure_is_reported(self):
+        dialog = FakeDialog(self.board())
+        dialog.settings.refill_zones = True
+        with mock.patch.object(round_tracks_action, 'round_board', return_value=Counter(full=1)),                 mock.patch.object(round_tracks_action.pcbnew, 'ZONE_FILLER', side_effect=RuntimeError('nofill')):
+            RoundTracks.run(dialog, None)
+        self.assertIn('nofill', wx.MessageBox.call_args[0][0])
+        dialog.EndModal.assert_not_called()
+
+    def test_done_message_mentions_selection(self):
+        dialog = FakeDialog(self.board())
+        dialog.settings.only_selection = True
+        dialog.selected_count = 7
+        with mock.patch.object(round_tracks_action, 'round_board', return_value=Counter(full=1)):
+            RoundTracks.run(dialog, None)
+        self.assertIn('Selection only: 7 tracks.', wx.MessageBox.call_args[0][0])
 
     def test_unround_failure_reports(self):
         board = self.board()

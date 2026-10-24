@@ -53,6 +53,12 @@ class RoundTracks(RoundTracksDialog):
         self.do_create.SetValue(read_new_file(text))
         self.avoid_junctions.SetValue(self.settings.avoid_junctions)
         self.min_radius.SetValue(str(self.settings.min_radius_mm))
+        self.refill_zones.SetValue(self.settings.refill_zones)
+        self.selected_count = self.count_selected_tracks()
+        if self.selected_count:
+            self.selected_only.SetLabel("Selected tracks only (%d selected)" % self.selected_count)
+            self.selected_only.SetValue(True)
+            self.selected_only.Enable(True)
 
         c = self.settings.classes
         default = c.get("Default", ClassSetting(True, RADIUS_DEFAULT))
@@ -64,6 +70,11 @@ class RoundTracks(RoundTracksDialog):
             self.netclasslist.AppendItem( [classname, cs.do_round, str(cs.radius_mm)])
         self.validate_all_data()
 
+
+    def count_selected_tracks(self):
+        """Selected tracks and arcs (not vias), counted when the dialog opens."""
+        return sum(1 for t in self.board.GetTracks()
+                   if t.IsSelected() and t.GetClass() in ('PCB_TRACK', 'PCB_ARC'))
 
     def run( self, event ):
         start = time.time()
@@ -81,22 +92,15 @@ class RoundTracks(RoundTracksDialog):
                 new_name = self.basefilename+"-rounded.kicad_pcb"
                 self.board.SetFileName(new_name)
 
-            anySelected = False
-            for t in self.board.GetTracks():
-                if t.IsSelected():
-                    anySelected = True
-                    break
-
-            self.settings.only_selection = anySelected
             stats = round_board(self.board, self.settings, progress=self.pulse)
 
-            # if m_AutoRefillZones is set, we should skip here, but PCBNEW_SETTINGS is not exposed to swig
-            # ZONE_FILLER has SetProgressReporter, but PROGRESS_REPORTER is also not available, so we can't use it
-            # even zone.SetNeedRefill(False) doesn't prevent it running twice
-            #self.prog.Pulse("Rebuilding zones...")
-            #wx.Yield()
-            #filler = pcbnew.ZONE_FILLER(self.board)
-            #filler.Fill(self.board.Zones())
+            if self.settings.refill_zones:
+                # opt-in: if m_AutoRefillZones is set KiCad may refill anyway, but
+                # PCBNEW_SETTINGS is not exposed to swig so we can't tell
+                self.prog.Pulse("Refilling zones...")
+                wx.Yield()
+                filler = pcbnew.ZONE_FILLER(self.board)
+                filler.Fill(self.board.Zones())
         except Exception:
             self.close_progress()
             self.report_error("Rounding failed.")
@@ -105,7 +109,10 @@ class RoundTracks(RoundTracksDialog):
             self.close_progress()
             self.apply.SetLabel(label)
 
-        wx.MessageBox("Done, took {:.3f} seconds\n\n{}".format(time.time()-start, summary_text(stats)), parent=self)
+        message = "Done, took {:.3f} seconds\n\n{}".format(time.time()-start, summary_text(stats))
+        if self.settings.only_selection:
+            message += "\n\nSelection only: %d tracks." % self.selected_count
+        wx.MessageBox(message, parent=self)
         self.EndModal(wx.ID_OK)
 
     def pulse(self, message):
@@ -149,11 +156,7 @@ class RoundTracks(RoundTracksDialog):
 
     def unround_arcs(self):
         """Turn arcs back into corners; return (arcs removed, hairpin arcs left alone)."""
-        anySelected = False
-        for t in self.board.GetTracks():
-            if t.IsSelected():
-                anySelected = True
-                break
+        anySelected = self.selected_only.IsChecked()
 
         board = self.board
         netcodes = board.GetNetsByNetcode()
@@ -345,7 +348,9 @@ class RoundTracks(RoundTracksDialog):
             min_radius = MIN_RADIUS_DEFAULT
             self.min_radius.SetValue(str(MIN_RADIUS_DEFAULT))
         self.settings = Settings(classes=classes, min_radius_mm=min_radius,
-                                 avoid_junctions=self.avoid_junctions.IsChecked())
+                                 avoid_junctions=self.avoid_junctions.IsChecked(),
+                                 only_selection=self.selected_only.IsChecked(),
+                                 refill_zones=self.refill_zones.IsChecked())
 
 
 class ActionRoundTracks( pcbnew.ActionPlugin ):

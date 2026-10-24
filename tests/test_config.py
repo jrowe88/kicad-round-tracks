@@ -60,6 +60,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg['classes']['Default']['passes'], 3)
         self.assertTrue(cfg['checkboxes']['new_file'])
 
+    def test_refill_zones_round_trip(self):
+        s = Settings(classes={'Default': ClassSetting(True, 2.0)}, refill_zones=True)
+        text = format_config(s, False)
+        self.assertIn('\nrefill_zones\tTrue\n', text)
+        self.assertTrue(parse_config(text).refill_zones)
+        s.refill_zones = False
+        self.assertFalse(parse_config(format_config(s, False)).refill_zones)
+
+    def test_refill_zones_defaults_false_for_old_files(self):
+        self.assertFalse(parse_config(LEGACY).refill_zones)
+        self.assertFalse(parse_config("").refill_zones)
+        self.assertFalse(parse_config("refill_zones\tmaybe\n").refill_zones)
+
+    def test_upstream_parser_tolerates_refill_zones(self):
+        s = Settings(classes={'Default': ClassSetting(True, 2.0)}, refill_zones=True)
+        cfg = upstream_load_config(format_config(s, True))
+        self.assertEqual(list(cfg['classes']), ['Default'])
+        self.assertTrue(cfg['checkboxes']['new_file'])
+
     def test_malformed_lines_skipped(self):
         s = parse_config("garbage\n\n\tx\nA\tTrue\tabc\t3\nmin_radius\tzz\n")
         self.assertEqual(s.classes, {})

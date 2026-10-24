@@ -3,7 +3,8 @@
 #
 # The format stays readable by upstream's plugin: class lines keep the legacy
 # "passes" column (written as 3, ignored on read) and the checkbox line keeps
-# three bools. The extra "min_radius" line is silently ignored by upstream.
+# three bools. The extra "min_radius" and "refill_zones" lines are silently
+# ignored by upstream.
 
 import math
 
@@ -41,17 +42,21 @@ def parse_config(text):
     """
     classes = {}
     min_radius = MIN_RADIUS_DEFAULT
+    refill = False
     for line in text.splitlines():
         params = line.split("\t")
         if params[0] == "min_radius" and len(params) == 2:
             min_radius = parse_length(params[1], MIN_RADIUS_DEFAULT)
+        elif params[0] == "refill_zones" and len(params) == 2:
+            refill = params[1] == "True"
         elif len(params) >= 3 and params[1] in ("True", "False") and params[0]:
             radius = parse_length(params[2], None)
             if radius is not None:
                 classes[params[0]] = ClassSetting(params[1] == "True", radius)
     boxes = _checkbox_fields(text)
     avoid = boxes is not None and boxes[2] == "True"
-    return Settings(classes=classes, min_radius_mm=min_radius, avoid_junctions=avoid)
+    return Settings(classes=classes, min_radius_mm=min_radius, avoid_junctions=avoid,
+                    refill_zones=refill)
 
 
 def read_new_file(text):
@@ -65,4 +70,5 @@ def format_config(settings, new_file):
              for name, cs in settings.classes.items()]
     lines.append('%s\t%s\t%s' % (new_file, True, settings.avoid_junctions))
     lines.append('min_radius\t%s' % settings.min_radius_mm)
+    lines.append('refill_zones\t%s' % settings.refill_zones)
     return '\n'.join(lines) + '\n'

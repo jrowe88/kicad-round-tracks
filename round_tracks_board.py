@@ -26,6 +26,7 @@ class Settings:
     min_radius_mm: float = 0.1
     only_selection: bool = False
     avoid_junctions: bool = False
+    refill_zones: bool = False    # dialog/config only: round_board ignores it
 
 
 def primary_class(net):
